@@ -26,6 +26,27 @@
     <!-- the padding on the top of the statusbar (usually 0) -->
     <dimen name="status_bar_padding_top">8dp</dimen>
 
-    <!-- Threshold in micro watts above which a charger is rated as "fast"; 2.16A @ 5V  -->
-    <integer name="config_chargingFastThreshold">10800000</integer>
+    <!-- Threshold in micro watts below which a charger is rated as "slow"; 1A @ 5V -->
+    <integer name="config_chargingSlowlyThreshold">5000</integer>
+
+    <!-- Threshold in micro watts above which a charger is rated as "fast"; 1.5A @ 5V  -->
+    <integer name="config_chargingFastThreshold">7500</integer>
+
+    <!-- Whether usage of the proximity sensor during doze is supported -->
+    <bool name="doze_proximity_sensor_supported">false</bool>
+
+    <!-- The CPU temperature sensor path, defaults to empty -->
+    <string name="config_cpuTempSensor" translatable="false">/sys/class/thermal/thermal_zone18/temp</string>
+
+    <!-- The CPU temperature divider, if needed -->
+    <integer name="config_cpuTempDivider" translatable="false">1000</integer>
+
+    <!-- the padding on the top of the statusbar (usually 0) -->
+    <dimen name="status_bar_padding_top">7dp</dimen>
+
+    <!-- If not zero, limits the internal screen recorder's framerate to the set value. -->
+    <integer name="config_screenRecorderMaxFramerate">60</integer>
+
+    <!-- Preferred max refresh rate at AOD & Ambient Display, if supported by the display. -->
+    <integer name="config_aodMaxRefreshRate">60</integer>
 </resources>
