@@ -439,6 +439,7 @@ PRODUCT_SOONG_NAMESPACES += \
     $(COMMON_PATH) \
     hardware/google/interfaces \
     hardware/google/pixel \
+    hardware/samsung-ext/interfaces \
     hardware/samsung
 
 # Prop files
