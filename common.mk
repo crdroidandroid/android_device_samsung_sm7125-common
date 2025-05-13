@@ -190,11 +190,7 @@ PRODUCT_PACKAGES += \
 PRODUCT_PACKAGES += \
     FM2 \
     libqcomfm_jni \
-    qcom.fmradio \
     qcom.fmradio.xml
-
-PRODUCT_BOOT_JARS += \
-    qcom.fmradio
 
 # Gatekeeper
 PRODUCT_PACKAGES += \
