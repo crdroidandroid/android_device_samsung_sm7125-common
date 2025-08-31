@@ -144,16 +144,15 @@ BOARD_SUPPORTS_SOUND_TRIGGER := true
 BOARD_BLUETOOTH_BDROID_BUILDCFG_INCLUDE_DIR := $(COMMON_PATH)/bluetooth/include
 
 # Camera
-$(call soong_config_set,samsungCameraVars,needs_sec_reserved_field,true)
+SOONG_CONFIG_NAMESPACES += samsungCameraVars
+SOONG_CONFIG_samsungCameraVars += \
+    extra_ids \
+    needs_sec_reserved_field
 
-# FOD
-TARGET_SURFACEFLINGER_UDFPS_LIB := //$(COMMON_PATH):libudfps_extension.sm7125
-TARGET_USES_FOD_ZPOS := true
-TARGET_SEC_FP_REQUEST_FORCE_CALIBRATE := true
-TARGET_SEC_FP_REQUEST_TOUCH_EVENT := true
+# ID=54 is macro
+SOONG_CONFIG_samsungCameraVars_extra_ids := 54
 
-# Display
-TARGET_ADDITIONAL_GRALLOC_10_USAGE_BITS := 0x2000U | 0x400000000LL
+SOONG_CONFIG_samsungCameraVars_needs_sec_reserved_field := true
 
 # HIDL manifests
 DEVICE_MANIFEST_FILE := $(COMMON_PATH)/configs/manifest.xml
