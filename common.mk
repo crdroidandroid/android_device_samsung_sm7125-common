@@ -388,11 +388,6 @@ PRODUCT_PACKAGES += \
 
 PRODUCT_SOONG_NAMESPACES += vendor/qcom/opensource/usb/etc
 
-#Flash control
-PRODUCT_PACKAGES += \
-    vendor.samsung_ext.hardware.camera.flashlight-service \
-    FlashControl
-
 # Vibrator
 PRODUCT_PACKAGES += \
     android.hardware.vibrator-service.samsung
