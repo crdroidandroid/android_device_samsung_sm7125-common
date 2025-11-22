@@ -16,5 +16,10 @@
     "repository": "crdroidandroid/proprietary_vendor_samsung_sm7125-common",
     "target_path": "vendor/samsung/sm7125-common",
     "branch": "16.0"
+  },
+  {
+    "repository": "LineageOS/android_hardware_samsung_slsi_nfc",
+    "target_path": "hardware/samsung_slsi/nfc",
+    "branch": "lineage-23.2"
   }
 ]
