@@ -200,7 +200,7 @@ PRODUCT_PRIVATE_SEPOLICY_DIRS += $(COMMON_PATH)/sepolicy/private
 PRODUCT_PUBLIC_SEPOLICY_DIRS += $(COMMON_PATH)/sepolicy/public
 
 # Vibrator
-$(call soong_config_set,samsungVibratorVars,duration_amplitude,true)
+$(call soong_config_set_bool,samsungVibratorVars,duration_amplitude,true)
 
 # Wifi
 BOARD_WLAN_DEVICE := qcwcn
