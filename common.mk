@@ -356,6 +356,7 @@ PRODUCT_PACKAGES += \
 # These are also useful for VoLTE-only bring-up because the telephony
 # framework still expects the WLAN data/network service hooks to exist.
 PRODUCT_PACKAGES += \
+    CarrierConfigResCommon \
     Iwlan \
     QualifiedNetworksService \
     PhhIms
