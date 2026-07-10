@@ -1,0 +1,55 @@
+plugins {
+    id 'com.android.application'
+    id 'kotlin-android'
+}
+
+android {
+    compileSdk 33
+    ndkVersion "25.1.8937393"
+
+    defaultConfig {
+        applicationId "me.phh.ims"
+        minSdk 32
+        targetSdk 33
+        versionCode 33
+        versionName "1.0"
+
+        }
+    sourceSets {
+        main {
+            jniLibs {
+                srcDirs += "${projectDir}/jniLibs"
+            }
+        }
+    }
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+    externalNativeBuild {
+        cmake {
+            path file('jni/CMakeLists.txt')
+        }
+    }
+    namespace 'me.phh.ims'
+}
+
+dependencies {
+    compileOnly fileTree(dir: 'libs', include: '*.jar')
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.6.1'
+}

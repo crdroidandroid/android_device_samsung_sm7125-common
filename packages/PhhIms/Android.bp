@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: GPL-2.0
+
+// IMS service providing VoLTE via a SIP/IMS stack
+android_app {
+    name: "PhhIms",
+
+    srcs: [
+        "app/src/main/java/**/*.kt",
+        "app/src/main/java/**/*.java",
+    ],
+    resource_dirs: ["app/src/main/res"],
+    manifest: "app/src/main/AndroidManifest.xml",
+
+
+    certificate: "platform",
+    privileged: true,
+    platform_apis: true,
+
+    static_libs: [
+        "kotlin-stdlib",
+        "kotlinx_coroutines",
+        "kotlinx_coroutines_android",
+    ],
+
+    jni_libs: [
+        "librnnoise_jni",
+        "libwebrtc_aec_jni",
+    ],
+    use_embedded_native_libs: true,
+
+    required: ["PhhImsOverlay"],
+}
+
+// Static RRO: registers me.phh.ims as the IMS MmTel service with the Phone app
+runtime_resource_overlay {
+    name: "PhhImsOverlay",
+    resource_dirs: ["overlay/res"],
+    manifest: "overlay/AndroidManifest.xml",
+    certificate: "platform",
+    product_specific: true,
+}
