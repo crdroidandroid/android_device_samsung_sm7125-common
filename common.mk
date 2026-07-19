@@ -351,6 +351,23 @@ PRODUCT_PACKAGES += \
     sehradiomanager \
     libjsoncpp.vendor
 
+# IMS
+# IMS over Wi-Fi data service and network qualification service.
+# These are also useful for VoLTE-only bring-up because the telephony
+# framework still expects the WLAN data/network service hooks to exist.
+PRODUCT_PACKAGES += \
+    Iwlan \
+    QualifiedNetworksService \
+    PhhIms
+
+PRODUCT_PROPERTY_OVERRIDES += \
+    persist.dbg.volte_avail_ovr=1 \
+    persist.dbg.wfc_avail_ovr=1 \
+    persist.dbg.allow_ims_off=1
+
+PRODUCT_COPY_FILES += \
+    $(LOCAL_PATH)/privapp-permissions-me.phh.ims.xml:$(TARGET_COPY_OUT_SYSTEM)/etc/permissions/privapp-permissions-me.phh.ims.xml
+
 # Sensors
 PRODUCT_PACKAGES += \
     android.hardware.sensors-service.samsung-multihal \
