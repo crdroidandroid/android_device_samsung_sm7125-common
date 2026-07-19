@@ -223,14 +223,20 @@ Return<Result> PrimaryDevice::setMode(AudioMode mode) {
     property_get("vendor.calls.slot_id0", simSlot1, "");
     property_get("vendor.calls.slot_id1", simSlot2, "");
 
-    // Wait until one sim slot reports a call
+    // Wait until one sim slot reports a call.
+    // If neither slot is active this is a software IMS/VoLTE call (phh-ims
+    // never sets vendor.calls.slot_id*), so remap IN_CALL -> IN_COMMUNICATION
+    // to avoid spinning forever and crashing the HAL.
     if (mode == AudioMode::IN_CALL) {
-        while (strcmp(simSlot1, "0") == 0 && strcmp(simSlot2, "0") == 0) {
-            property_get("vendor.calls.slot_id0", simSlot1, "");
-            property_get("vendor.calls.slot_id1", simSlot2, "");
+        if (strcmp(simSlot1, "0") == 0 && strcmp(simSlot2, "0") == 0) {
+            mode = AudioMode::IN_COMMUNICATION;
+        } else {
+            while (strcmp(simSlot1, "0") == 0 && strcmp(simSlot2, "0") == 0) {
+                property_get("vendor.calls.slot_id0", simSlot1, "");
+                property_get("vendor.calls.slot_id1", simSlot2, "");
+            }
         }
     }
-
     if (strcmp(simSlot1, "1") == 0) {
         // SIM1
         mDevice->halSetParameters("g_call_sim_slot=0x01");
