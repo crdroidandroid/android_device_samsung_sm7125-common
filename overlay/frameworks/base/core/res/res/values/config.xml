@@ -34,7 +34,13 @@
     <bool name="config_device_vt_available">true</bool>
 
     <!-- Flag specifying whether WFC over IMS is available on device -->
-        <bool name="config_device_wfc_ims_available">true</bool>
+    <bool name="config_device_wfc_ims_available">true</bool>
+
+    <string name="config_wlan_data_service_package">com.google.android.iwlan</string>
+
+    <string name="config_wlan_network_service_package">com.google.android.iwlan</string>
+
+    <string name="config_qualified_networks_service_package">com.android.telephony.qns</string>
 
     <!-- Whether UI for multi user should be shown -->
     <bool name="config_enableMultiUserUI">true</bool>
