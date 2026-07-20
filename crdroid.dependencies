@@ -21,5 +21,9 @@
     "repository": "LineageOS/android_hardware_samsung_slsi_nfc",
     "target_path": "hardware/samsung_slsi/nfc",
     "branch": "lineage-23.2"
+  },
+  {
+    "repository": "crdroidandroid/android_packages_apps_PhhIms",
+    "target_path": "packages/apps/PhhIms"
   }
 ]
