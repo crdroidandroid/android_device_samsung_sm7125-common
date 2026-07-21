@@ -1106,8 +1106,12 @@ fun setRequestCallback(method: SipMethod, cb: (SipRequest) -> Int) {
         } else if (wasReady) {
             Rlog.w(TAG, "Suppressing framework IMS deregistration during transient reconnect cleanup: $reason")
         }
-        closeSipTransports(reason)
+        // Release IPsec SPIs and server transforms before closing SIP sockets.
+        // Closing sockets first can leave XFRM state holding a reference to the
+        // ipsecX netdev while the kernel tears it down, causing
+        // unregister_netdevice refcount=2 → use-after-free in dst_destroy.
         closeIpsecResources(reason)
+        closeSipTransports(reason)
     }
 
     fun shutdown(reason: String, notifyFramework: Boolean = true) {
@@ -1321,6 +1325,9 @@ fun onWfcDisabled(reason: String) {
 
             val dropReason = "WFC disabled while registered over IWLAN: $reason"
             Rlog.w(TAG, "Pre-dropping IWLAN IMS without immediate reconnect: $dropReason")
+            // Eagerly release IPsec SPIs and transforms before the IWLAN network
+            // tears down ipsec1, to avoid unregister_netdevice refcount race.
+            closeIpsecResources("WFC disabled (eager pre-cleanup)")
             pendingCellularReconnectAfterWfcDisable = true
             reconnectController.invalidatePendingReconnects(dropReason)
             dropImsConnection(dropReason)
@@ -2394,6 +2401,10 @@ fun onWfcDisabled(reason: String) {
                 Rlog.d(TAG, "Unregistering stale IMS NetworkCallback failed", t)
             }
             Rlog.w(TAG, "Current IMS network was lost; dropping SIP state")
+            // Eagerly release IPsec SPIs and transforms while the ipsecX netdev
+            // is still alive to avoid a race with unregister_netdevice refcount=2
+            // → use-after-free in dst_destroy during ipsec1 teardown.
+            closeIpsecResources("IMS network lost (eager pre-cleanup)")
             val outgoingSetupFailure = outgoingCallSetupFailureForImsNetworkLoss()
             Rlog.w(TAG, "Invalidating IMS reconnect generation: current IMS network lost")
             reconnectController.invalidatePendingReconnects("IMS network state changed")
