@@ -18,45 +18,78 @@ import android.telephony.ims.stub.ImsRegistrationImplBase
 class PhhImsService : ImsService() {
     companion object {
         private const val TAG = "PHH ImsService"
+        private const val PERIODIC_REGISTER_EXACT_DELAY_MS = 3_000_000L
+        private const val PERIODIC_REGISTER_INEXACT_FALLBACK_DELAY_MS = 1_800_000L
 
         var instance: PhhImsService? = null
     }
 
     private val receiver = PhhImsBroadcastReceiver()
+    private var receiverRegistered = false
+    private val stateLock = Any()
 
     private val mmTelFeaturesBySlot = mutableMapOf<Int, PhhMmTelFeature>()
     private val configsBySlot = mutableMapOf<Int, PhhImsConfig>()
     private val imsRegistrationsBySlot = mutableMapOf<Int, ImsRegistrationImplBase>()
 
     override fun onCreate() {
+        super.onCreate()
         Rlog.d(TAG, "onCreate")
 
         val intentFilter = IntentFilter()
         intentFilter.addAction(receiver.ALARM_PERIODIC_REGISTER)
 
         registerReceiver(receiver, intentFilter, Context.RECEIVER_NOT_EXPORTED)
+        receiverRegistered = true
         armPeriodicRegisterAlarm()
     }
 
-    fun armPeriodicRegisterAlarm() {
-        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+    private fun periodicRegisterPendingIntent(): PendingIntent {
         val intent = Intent(receiver.ALARM_PERIODIC_REGISTER)
-        val pendingIntent = PendingIntent.getBroadcast(
+        return PendingIntent.getBroadcast(
             this,
             0,
             intent,
             PendingIntent.FLAG_IMMUTABLE,
         )
+    }
 
-        // We want recurring 3000s but recurring alarms don't wake up from
-        // doze: alarm will re-arm itself.
-        alarmManager.setAndAllowWhileIdle(
-            AlarmManager.ELAPSED_REALTIME_WAKEUP,
-            SystemClock.elapsedRealtime() + 3_000_000,
-            pendingIntent,
-        )
+    fun armPeriodicRegisterAlarm() {
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val pendingIntent = periodicRegisterPendingIntent()
 
-        Rlog.d(TAG, "Alarm set")
+        // The carrier may grant only a one-hour registration lifetime. An
+        // inexact 3000s alarm receives a large delivery window and can fire
+        // after that registration and its IPsec association have expired.
+        val nowMs = SystemClock.elapsedRealtime()
+        var exactAlarmScheduled = false
+        if (alarmManager.canScheduleExactAlarms()) {
+            try {
+                alarmManager.setExactAndAllowWhileIdle(
+                    AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                    nowMs + PERIODIC_REGISTER_EXACT_DELAY_MS,
+                    pendingIntent,
+                )
+                exactAlarmScheduled = true
+            } catch (e: SecurityException) {
+                Rlog.w(TAG, "Exact periodic REGISTER alarm was denied", e)
+            }
+        }
+
+        val delayMs = if (exactAlarmScheduled) {
+            PERIODIC_REGISTER_EXACT_DELAY_MS
+        } else {
+            // Keep the inexact alarm's delivery window safely below the
+            // carrier-granted lifetime if exact alarm access is unavailable.
+            alarmManager.setAndAllowWhileIdle(
+                AlarmManager.ELAPSED_REALTIME_WAKEUP,
+                nowMs + PERIODIC_REGISTER_INEXACT_FALLBACK_DELAY_MS,
+                pendingIntent,
+            )
+            PERIODIC_REGISTER_INEXACT_FALLBACK_DELAY_MS
+        }
+
+        Rlog.d(TAG, "Alarm set exact=$exactAlarmScheduled delayMs=$delayMs")
     }
 
     private fun notifyFeatureSubscriptionChanged(
@@ -64,7 +97,7 @@ class PhhImsService : ImsService() {
         subscriptionId: Int,
         reason: String,
     ) {
-        val feature = mmTelFeaturesBySlot[slotId] ?: return
+        val feature = synchronized(stateLock) { mmTelFeaturesBySlot[slotId] } ?: return
 
         Rlog.d(
             TAG,
@@ -83,7 +116,7 @@ class PhhImsService : ImsService() {
             "createMmTelFeatureForSubscription slotId=$slotId subscriptionId=$subscriptionId",
         )
 
-        val existingFeature = mmTelFeaturesBySlot[slotId]
+        val existingFeature = synchronized(stateLock) { mmTelFeaturesBySlot[slotId] }
         if (existingFeature != null) {
             notifyFeatureSubscriptionChanged(
                 slotId,
@@ -93,8 +126,10 @@ class PhhImsService : ImsService() {
             return existingFeature
         }
 
-        return PhhMmTelFeature(slotId, subscriptionId).also { feature ->
-            mmTelFeaturesBySlot[slotId] = feature
+        return synchronized(stateLock) {
+            mmTelFeaturesBySlot.getOrPut(slotId) {
+                PhhMmTelFeature(slotId, subscriptionId)
+            }
         }
     }
 
@@ -114,8 +149,10 @@ class PhhImsService : ImsService() {
 
         notifyFeatureSubscriptionChanged(slotId, subscriptionId, "getConfigForSubscription")
 
-        return configsBySlot.getOrPut(slotId) {
-            PhhImsConfig()
+        return synchronized(stateLock) {
+            configsBySlot.getOrPut(slotId) {
+                PhhImsConfig()
+            }
         }
     }
 
@@ -127,24 +164,61 @@ class PhhImsService : ImsService() {
 
         notifyFeatureSubscriptionChanged(slotId, subscriptionId, "getRegistrationForSubscription")
 
-        return imsRegistrationsBySlot.getOrPut(slotId) {
-            ImsRegistrationImplBase()
+        return synchronized(stateLock) {
+            imsRegistrationsBySlot.getOrPut(slotId) {
+                ImsRegistrationImplBase()
+            }
         }
     }
 
     fun getActiveSipHandlers() =
-        mmTelFeaturesBySlot.values.mapNotNull { it.getSipHandlerOrNull() }
+        synchronized(stateLock) {
+            mmTelFeaturesBySlot.values.toList()
+        }.mapNotNull { it.getSipHandlerOrNull() }
 
-    class LocalBinder : Binder() {
+    inner class LocalBinder : Binder() {
         fun getService(): PhhImsService {
             Rlog.d(TAG, "LocalBinder getService")
-            return PhhImsService()
+            return this@PhhImsService
         }
     }
 
     override fun onDestroy() {
         Rlog.d(TAG, "onDestroy")
-        instance = null
+
+        val features = synchronized(stateLock) {
+            val snapshot = mmTelFeaturesBySlot.values.toList()
+            mmTelFeaturesBySlot.clear()
+            configsBySlot.clear()
+            imsRegistrationsBySlot.clear()
+            snapshot
+        }
+        features.forEach { feature ->
+            try {
+                feature.onFeatureRemoved()
+            } catch (t: Throwable) {
+                Rlog.w(TAG, "Failed retiring MMTEL feature during service teardown", t)
+            }
+        }
+
+        try {
+            val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            alarmManager.cancel(periodicRegisterPendingIntent())
+        } catch (t: Throwable) {
+            Rlog.w(TAG, "Failed cancelling periodic REGISTER alarm", t)
+        }
+
+        if (receiverRegistered) {
+            try {
+                unregisterReceiver(receiver)
+            } catch (t: Throwable) {
+                Rlog.w(TAG, "Failed unregistering IMS broadcast receiver", t)
+            }
+            receiverRegistered = false
+        }
+
+        if (instance === this) instance = null
+        super.onDestroy()
     }
 
     override fun readyForFeatureCreation() {

@@ -26,7 +26,11 @@ class PhhImsSms(val slotId: Int) : ImsSmsImplBase() {
     ) {
         try {
             // called when android tries to send a sms?
-            Rlog.d(TAG, "$slotId sendSms $token, $messageRef, $format, $smsc")
+            Rlog.d(
+                TAG,
+                "$slotId sendSms token=$token ref=$messageRef format=$format " +
+                    "smscProvided=${!smsc.isNullOrBlank()} pduBytes=${pdu.size}",
+            )
             if (format != "3gpp") {
                 // we only know how to send 3gpp formatted sms.
                 // Android should do that correctly, error if not that will
@@ -69,8 +73,19 @@ class PhhImsSms(val slotId: Int) : ImsSmsImplBase() {
                     )
                 }
             )
-        } catch(t: Throwable) {
+        } catch (t: Throwable) {
             android.util.Log.e(TAG, "Failed sending sms", t)
+            try {
+                onSendSmsResultError(
+                    token,
+                    messageRef,
+                    ImsSmsImplBase.SEND_STATUS_ERROR_FALLBACK,
+                    SmsManager.RESULT_ERROR_GENERIC_FAILURE,
+                    RESULT_NO_NETWORK_ERROR,
+                )
+            } catch (callbackFailure: Throwable) {
+                android.util.Log.e(TAG, "Failed reporting SMS send failure", callbackFailure)
+            }
         }
     }
     override fun acknowledgeSms(token: Int, messageRef: Int, result: Int) {

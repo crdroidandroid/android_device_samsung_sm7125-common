@@ -87,6 +87,18 @@ internal class SipDispatcher(
         requestWriters.clear()
     }
 
+    fun removeWriterForCallId(callId: String) {
+        requestWriters.remove(callId)
+    }
+
+    fun removeWritersFor(writer: OutputStream) {
+        requestWriters.forEach { (callId, registeredWriter) ->
+            if (registeredWriter === writer) {
+                requestWriters.remove(callId, registeredWriter)
+            }
+        }
+    }
+
     fun writerForCallId(callId: String): OutputStream? = requestWriters[callId]
 
     fun hasWriterForCallId(callId: String): Boolean = requestWriters.containsKey(callId)
@@ -94,6 +106,9 @@ internal class SipDispatcher(
     fun parseMessage(reader: SipReader, writer: OutputStream): Boolean {
         val msg = try {
             reader.parseMessage()
+        } catch (e: SipParseException) {
+            Rlog.w(tag, "Rejecting malformed SIP message: ${e.message}")
+            return false
         } catch (e: SocketException) {
             Rlog.d(tag, "Got exception $e")
             if ("$e" == "java.net.SocketException: Try again") {
@@ -103,7 +118,7 @@ internal class SipDispatcher(
             throw e
         }
 
-        Rlog.d(tag, "RObject() message $msg")
+        Rlog.d(tag, "Received ${msg?.safeLogSummary() ?: "end-of-stream"}")
 
         if (msg is SipResponse) {
             return handleResponse(msg)
@@ -147,6 +162,7 @@ internal class SipDispatcher(
             statusString = when (status) {
                 100 -> "Trying"
                 200 -> "OK"
+                480 -> "Temporarily Unavailable"
                 481 -> "Call/Transaction Does Not Exist"
                 486 -> "Busy Here"
                 487 -> "Request Terminated"
@@ -158,7 +174,7 @@ internal class SipDispatcher(
             headersParam = responseHeaders,
         )
 
-        Rlog.d(tag, "Replying back with $reply")
+        Rlog.d(tag, "Replying with ${reply.safeLogSummary()}")
         return SipMessageWriter.write(
             tag = tag,
             writer = writer,
@@ -184,8 +200,10 @@ internal class SipDispatcher(
         if (responseCb(response)) {
             lock.withLock {
                 if (transactionKey != null && transactionCb != null) {
-                    transactionResponseCallbacks -= transactionKey
-                } else {
+                    if (transactionResponseCallbacks[transactionKey] === responseCb) {
+                        transactionResponseCallbacks -= transactionKey
+                    }
+                } else if (responseCallbacks[callId] === responseCb) {
                     responseCallbacks -= callId
                 }
             }

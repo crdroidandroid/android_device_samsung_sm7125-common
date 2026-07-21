@@ -166,7 +166,8 @@ internal object SipOutgoingInviteProgressResponses {
     ): String =
         "Outgoing dialog request failed: " +
             "status=${response.statusCode} ${response.statusString} " +
-            "cseq=$failedCseq callId=$failedCallId"
+            "cseq=$failedCseq callId=$failedCallId " +
+            "diagnosticHeaders=${SipCarrierDiagnostics.responseHeaders(response)}"
 
     fun outgoingDialogFailureCleanupReason(): String =
         "outgoing dialog failure"
@@ -195,6 +196,21 @@ internal object SipOutgoingInviteProgressResponses {
             "statusString" to response.statusString,
             "cseq" to failedCseq,
         )
+
+    fun outgoingFailureRoutingExtras(
+        initialInviteFailed: Boolean,
+        csRetry: Boolean,
+    ): Map<String, String> {
+        val extras = mutableMapOf<String, String>()
+        if (initialInviteFailed) {
+            extras["callStartFailed"] = "true"
+            extras["outgoingCall"] = "true"
+        }
+        if (csRetry) {
+            extras["csRetry"] = "true"
+        }
+        return extras
+    }
 
     fun progressNotification(
         logTag: String,

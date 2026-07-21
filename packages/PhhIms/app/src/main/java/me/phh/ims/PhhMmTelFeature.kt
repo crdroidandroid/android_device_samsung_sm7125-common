@@ -90,7 +90,7 @@ private fun ServiceState.phhImsReadyDebug(
     val iwlanRegistration = phhIwlanRegistrationForIms()
 
     return "state=$state registeredPlmn=$registeredPlmn " +
-        "iwlanReg=${iwlanRegistration?.networkRegistrationState} " +
+        "iwlanRegistered=${iwlanRegistration?.isNetworkRegistered} " +
         "iwlanRat=${iwlanRegistration?.accessNetworkTechnology}"
 }
 
@@ -101,6 +101,8 @@ class PhhMmTelFeature(
 
     // MMTEL capabilities are configured independently per registration technology.
     private val enabledMmTelCapabilitiesByRadioTech = mutableMapOf<Int, Int>()
+    private val configuredMmTelRadioTechs = mutableSetOf<Int>()
+    private var sipRegistrationReadyForCapabilities = false
 
     private fun recomputeEnabledMmTelCapabilitiesLocked(): Int {
         var result = 0
@@ -112,6 +114,7 @@ class PhhMmTelFeature(
 
     private fun setMmTelCapabilityForRadioTech(capability: Int, radioTech: Int, enabled: Boolean) {
         synchronized(enabledMmTelCapabilitiesByRadioTech) {
+            configuredMmTelRadioTechs += radioTech
             val oldCaps = enabledMmTelCapabilitiesByRadioTech[radioTech] ?: 0
             val newCaps = if (enabled) {
                 oldCaps or capability
@@ -126,17 +129,51 @@ class PhhMmTelFeature(
         }
     }
 
-    private fun notifyEnabledMmTelCapabilitiesChanged() {
-        val finalCapabilities = synchronized(enabledMmTelCapabilitiesByRadioTech) {
-            recomputeEnabledMmTelCapabilitiesLocked()
+    private fun configuredCapabilitiesForRadioTech(radioTech: Int): Int? =
+        synchronized(enabledMmTelCapabilitiesByRadioTech) {
+            if (radioTech in configuredMmTelRadioTechs) {
+                enabledMmTelCapabilitiesByRadioTech[radioTech] ?: 0
+            } else {
+                null
+            }
         }
+
+    private fun currentRegistrationTech(): Int? =
+        if (this::sipHandler.isInitialized) sipHandler.getRegistrationTech() else null
+
+    private fun notifyEnabledMmTelCapabilitiesChanged(reason: String) {
+        val registrationTech = currentRegistrationTech()
+        val configuredCapabilities = if (registrationTech != null) {
+            configuredCapabilitiesForRadioTech(registrationTech)
+                ?: MmTelCapabilities.CAPABILITY_TYPE_VOICE
+        } else {
+            synchronized(enabledMmTelCapabilitiesByRadioTech) {
+                recomputeEnabledMmTelCapabilitiesLocked()
+            }
+        }
+        val finalCapabilities = configuredCapabilities or
+            if (sipRegistrationReadyForCapabilities) {
+                MmTelCapabilities.CAPABILITY_TYPE_SMS
+            } else {
+                0
+            }
         Rlog.i(
             TAG,
-            "Final MMTEL capabilities=$finalCapabilities perTech=$enabledMmTelCapabilitiesByRadioTech"
+            "Final MMTEL capabilities=$finalCapabilities registrationTech=$registrationTech " +
+                "reason=$reason perTech=$enabledMmTelCapabilitiesByRadioTech"
         )
         notifyCapabilitiesStatusChanged(
             android.telephony.ims.feature.MmTelFeature.MmTelCapabilities(finalCapabilities)
         )
+    }
+
+    private fun syncSipHandlerVoiceCapability(reason: String) {
+        if (!this::sipHandler.isInitialized) return
+        val registrationTech = sipHandler.getRegistrationTech()
+        val enabled = configuredCapabilitiesForRadioTech(registrationTech)
+            ?.let { it and MmTelCapabilities.CAPABILITY_TYPE_VOICE != 0 }
+            ?: return
+        sipHandler.setMmtelVoiceEnabled(enabled, reason)
     }
 
     protected override fun onChangeEnabledCapabilities(
@@ -167,7 +204,8 @@ class PhhMmTelFeature(
                 android.telephony.ims.feature.ImsFeature.CAPABILITY_SUCCESS
             )
         }
-        notifyEnabledMmTelCapabilitiesChanged()
+        syncSipHandlerVoiceCapability("framework capability change")
+        notifyEnabledMmTelCapabilitiesChanged("framework capability change")
     }
 
     override fun queryCapabilityConfiguration(capability: Int, radioTech: Int): Boolean {
@@ -188,7 +226,7 @@ class PhhMmTelFeature(
 
     var telephonyManager: TelephonyManager? = null
     private val readyCheckHandler = Handler(Looper.getMainLooper())
-    private val readyCheckExecutor = Executors.newSingleThreadExecutor()
+    private var readyCheckExecutor = Executors.newSingleThreadExecutor()
     private var readyCheckCallback: TelephonyCallback? = null
     private var readyCheckAttempts = 0
     private var frameworkSubId = initialSubId
@@ -201,11 +239,15 @@ class PhhMmTelFeature(
     private var outgoingCallListener: ImsCallSessionListener? = null
     private var outgoingCallActive = false
     private var outgoingCallSipCallId: String? = null
+    private var outgoingCallProgressReported = false
+    private var outgoingCallSessionStateReporter: ((Int) -> Unit)? = null
     private var outgoingCallAutoResumeReporter: ((Map<String, String>) -> Unit)? = null
     private var outgoingCallRemoteHoldReporter: ((Map<String, String>, Boolean) -> Unit)? = null
     private val incomingCallListenersLock = Object()
     private val incomingCallListenersByCallId = mutableMapOf<String, ImsCallSessionListener>()
     private val incomingCallProfilesByCallId = mutableMapOf<String, ImsCallProfile>()
+    private val incomingCallConnectedReportersByCallId =
+        mutableMapOf<String, (Map<String, String>) -> Unit>()
     private var lastIncomingCallListener: ImsCallSessionListener? = null
 
     fun getSipHandlerOrNull(): SipHandler? {
@@ -235,6 +277,7 @@ class PhhMmTelFeature(
         synchronized(incomingCallListenersLock) {
             val removed = incomingCallListenersByCallId.remove(callId)
             incomingCallProfilesByCallId.remove(callId)
+            incomingCallConnectedReportersByCallId.remove(callId)
             if (removed != null && lastIncomingCallListener == removed) {
                 lastIncomingCallListener = incomingCallListenersByCallId.values.lastOrNull()
             }
@@ -250,6 +293,7 @@ class PhhMmTelFeature(
                 // the last incoming listener on a miss, otherwise an outgoing
                 // foreground termination can wrongly terminate a waiting call.
                 incomingCallProfilesByCallId.remove(normalizedCallId)
+                incomingCallConnectedReportersByCallId.remove(normalizedCallId)
                 incomingCallListenersByCallId.remove(normalizedCallId)
             } else {
                 val fallbackListener = lastIncomingCallListener
@@ -258,6 +302,7 @@ class PhhMmTelFeature(
                     ?.key
                 if (fallbackCallId != null) {
                     incomingCallProfilesByCallId.remove(fallbackCallId)
+                    incomingCallConnectedReportersByCallId.remove(fallbackCallId)
                     incomingCallListenersByCallId.remove(fallbackCallId)
                 }
                 fallbackListener
@@ -268,6 +313,26 @@ class PhhMmTelFeature(
             }
             return listener
         }
+    }
+
+    private fun rememberIncomingCallConnectedReporter(
+        callId: String,
+        reporter: (Map<String, String>) -> Unit,
+    ) {
+        synchronized(incomingCallListenersLock) {
+            incomingCallConnectedReportersByCallId[callId] = reporter
+        }
+    }
+
+    private fun reportIncomingCallConnected(callId: String, extras: Map<String, String>) {
+        val reporter = synchronized(incomingCallListenersLock) {
+            incomingCallConnectedReportersByCallId[callId]
+        }
+        if (reporter == null) {
+            Rlog.w(TAG, "No IMS session waiting for incoming ACK: callId=$callId")
+            return
+        }
+        reporter(extras)
     }
 
     private fun peekIncomingCallSession(
@@ -281,13 +346,8 @@ class PhhMmTelFeature(
     }
 
     private fun refreshMmTelCapabilities(reason: String) {
-        val capabilities = MmTelCapabilities()
-        capabilities.addCapabilities(
-            MmTelCapabilities.CAPABILITY_TYPE_VOICE or
-                MmTelCapabilities.CAPABILITY_TYPE_SMS
-        )
-        Rlog.d(TAG, "Refreshing MmTel capabilities after $reason: $capabilities")
-        notifyCapabilitiesStatusChanged(capabilities)
+        syncSipHandlerVoiceCapability(reason)
+        notifyEnabledMmTelCapabilitiesChanged(reason)
     }
 
     private fun resolveSubIdForSlot(): Int {
@@ -380,6 +440,9 @@ class PhhMmTelFeature(
     }
 
     private fun bindReadyCheckTelephonyManager(reason: String) {
+        if (readyCheckExecutor.isShutdown) {
+            readyCheckExecutor = Executors.newSingleThreadExecutor()
+        }
         val subId = resolveSubIdForSlot()
         if (!SubscriptionManager.isValidSubscriptionId(subId)) {
             if (readyCheckAttempts < 30) {
@@ -571,15 +634,18 @@ class PhhMmTelFeature(
             }
 
             override fun accept(callType: Int, profile: ImsStreamMediaProfile) {
-                Rlog.d(TAG, "Accepting call with callType $callType profile $profile")
+                Rlog.d(TAG, "Accepting outgoing call session callType=$callType")
             }
 
             override fun isInCall(): Boolean {
-                return true
+                return mState != State.IDLE &&
+                    mState != State.INVALID &&
+                    mState != State.TERMINATED
             }
 
             override fun start(callee: String, profile: ImsCallProfile) {
-            Rlog.d(TAG, "Starting call with $callee profile $profile")
+            Rlog.d(TAG, "Starting outgoing IMS call")
+            outgoingCallProgressReported = false
 
             if (!sipHandler.isReadyForOutgoingCall()) {
                 Rlog.w(TAG, "Rejecting outgoing call while IMS is reconnecting/not ready")
@@ -725,11 +791,17 @@ class PhhMmTelFeature(
             }
             override fun terminate(reason: Int) {
                 Rlog.d(TAG, "Terminating call with reason $reason")
+                if (mState == State.TERMINATED) {
+                    Rlog.d(TAG, "Ignoring terminate for an already terminated call")
+                    return
+                }
+                mState = State.TERMINATING
                 sipHandler.myHandler.post {
                     sipHandler.terminateCall(outgoingCallSipCallId)
                 }
             }
         }.also { session ->
+            outgoingCallSessionStateReporter = { state -> session.mState = state }
             sipHandler.onOutgoingCallConnected = { _: Object, extras: Map<String, String> ->
                 Rlog.d(TAG, "Outgoing call connected")
                 extras["call-id"]?.let { outgoingCallSipCallId = it }
@@ -739,16 +811,19 @@ class PhhMmTelFeature(
                 )
                 session.currentCallProfile = callProfile
                 session.mListener.callSessionInitiated(callProfile)
+                outgoingCallProgressReported = true
             }
 
             sipHandler.onOutgoingCallProgressing = { _: Object, extras: Map<String, String> ->
                 Rlog.d(TAG, "Outgoing call progressing: $extras")
                 extras["call-id"]?.let { outgoingCallSipCallId = it }
+                session.mState = ImsCallSessionImplBase.State.ESTABLISHING
                 val callProfile = makeVoiceCallProfile()
                 callProfile.mMediaProfile.mAudioDirection =
                     android.telephony.ims.ImsStreamMediaProfile.DIRECTION_INACTIVE
                 session.currentCallProfile = callProfile
                 session.mListener.callSessionProgressing(callProfile.mMediaProfile)
+                outgoingCallProgressReported = true
             }
 
             outgoingCallAutoResumeReporter = { extras ->
@@ -832,6 +907,7 @@ class PhhMmTelFeature(
     private fun makeVoiceCallProfile(
         callerNumber: String? = null,
         audioQuality: Int = ImsStreamMediaProfile.AUDIO_QUALITY_AMR,
+        presentationRestricted: Boolean = false,
     ): ImsCallProfile {
         val callProfile = ImsCallProfile(
             ImsCallProfile.SERVICE_TYPE_NORMAL,
@@ -847,7 +923,16 @@ class PhhMmTelFeature(
         )
 
         val normalizedCaller = callerNumber?.trim()?.takeIf { it.isNotEmpty() }
-        if (normalizedCaller != null) {
+        if (presentationRestricted) {
+            callProfile.setCallExtraInt(
+                ImsCallProfile.EXTRA_OIR,
+                ImsCallProfile.OIR_PRESENTATION_RESTRICTED,
+            )
+            callProfile.setCallExtraInt(
+                ImsCallProfile.EXTRA_CNAP,
+                ImsCallProfile.OIR_PRESENTATION_RESTRICTED,
+            )
+        } else if (normalizedCaller != null) {
             callProfile.setCallExtra(ImsCallProfile.EXTRA_OI, normalizedCaller)
             callProfile.setCallExtra(ImsCallProfile.EXTRA_CNA, normalizedCaller)
             callProfile.setCallExtra(ImsCallProfile.EXTRA_DISPLAY_TEXT, normalizedCaller)
@@ -908,8 +993,15 @@ class PhhMmTelFeature(
         val localHangup = map["localHangup"] == "true"
         val remoteNoMediaRelease = map["remoteNoMediaRelease"] == "true"
         val csRetry = map["csRetry"] == "true"
+        val imsRetry = map["imsRetry"] == "true"
 
         return when {
+            imsRetry -> ImsReasonInfo(
+                ImsReasonInfo.CODE_LOCAL_CALL_VOLTE_RETRY_REQUIRED,
+                0,
+                statusMessage,
+            )
+
             csRetry -> ImsReasonInfo(
                 ImsReasonInfo.CODE_LOCAL_CALL_CS_RETRY_REQUIRED,
                 ImsReasonInfo.EXTRA_CODE_CALL_RETRY_SILENT_REDIAL,
@@ -925,7 +1017,11 @@ class PhhMmTelFeature(
                 ImsReasonInfo(ImsReasonInfo.CODE_USER_TERMINATED_BY_REMOTE, 0, statusMessage)
             }
 
-            statusCode >= 400 -> ImsReasonInfo(ImsReasonInfo.CODE_NETWORK_REJECT, 0, statusMessage)
+            statusCode >= 300 -> ImsReasonInfo(
+                SipImsReasonCodeMapper.fromStatusCode(statusCode),
+                0,
+                statusMessage,
+            )
 
             else -> ImsReasonInfo(ImsReasonInfo.CODE_USER_TERMINATED_BY_REMOTE, 0, "Kikoo")
         }
@@ -968,6 +1064,7 @@ class PhhMmTelFeature(
         sipHandlerSubId = subId
         sipHandler = SipHandler(imsService, slotId, subId)
 sipHandler.imsFailureCallback = {
+            sipRegistrationReadyForCapabilities = false
             imsService.getRegistrationForSubscription(slotId, subId).onDeregistered(null)
         }
         sipHandler.imsRegisteringCallback = { tech ->
@@ -977,6 +1074,7 @@ sipHandler.imsFailureCallback = {
         sipHandler.imsReadyCallback = {
             val tech = sipHandler.getRegistrationTech()
             Rlog.d(TAG, "IMS SIP registered, reporting registration tech $tech")
+            sipRegistrationReadyForCapabilities = true
             imsService.getRegistrationForSubscription(slotId, subId).onRegistered(tech)
             refreshMmTelCapabilities("SIP registered")
         }
@@ -987,14 +1085,43 @@ sipHandler.imsFailureCallback = {
         sipHandler.onIncomingCall = { handle: Object, from: String, extras: Map<String, String> -> 
             val callerNumber = from.trim()
             val callProfile = makeVoiceCallProfile(
-            callerNumber,
-            audioQualityFromSipExtras(extras),
-        )
+                callerNumber = callerNumber,
+                audioQuality = audioQualityFromSipExtras(extras),
+                presentationRestricted = extras["presentation-restricted"] == "true",
+            )
             val incomingCallId = extras["call-id"]!!
             val isCallWaitingSession = extras["call-waiting"] == "true"
             val incomingSession = object: ImsCallSessionImplBase() {
                 var mState = State.IDLE
                 private var sessionListener: ImsCallSessionListener? = null
+                private var connectionReported = false
+                private var terminalReported = false
+
+                fun reportConnected(extras: Map<String, String>) {
+                    if (connectionReported || terminalReported) return
+                    connectionReported = true
+                    mState = State.ESTABLISHED
+                    Rlog.d(
+                        TAG,
+                        "Incoming call confirmed by ACK: callId=$incomingCallId extras=$extras",
+                    )
+                    sessionListener?.callSessionInitiated(callProfile)
+                }
+
+                fun reportAcceptFailure() {
+                    if (connectionReported || terminalReported) return
+                    terminalReported = true
+                    mState = State.TERMINATED
+                    forgetIncomingCallListener(incomingCallId)
+                    sessionListener?.callSessionInitiatingFailed(
+                        ImsReasonInfo(
+                            ImsReasonInfo.CODE_NETWORK_REJECT,
+                            0,
+                            "Could not send SIP 200 response",
+                        ),
+                    )
+                }
+
                 override fun getCallProfile(): ImsCallProfile {
                     return callProfile
                 }
@@ -1024,7 +1151,7 @@ sipHandler.imsFailureCallback = {
                 }
 
                 override fun start(callee: String, profile: ImsCallProfile) {
-                    Rlog.d(TAG, "Starting call with $callee")
+                    Rlog.d(TAG, "Ignoring start() on an incoming IMS session")
                 }
 
                 override fun accept(callType: Int, profile: ImsStreamMediaProfile) {
@@ -1035,11 +1162,13 @@ sipHandler.imsFailureCallback = {
                                 "callId=$incomingCallId profile=$profile",
                         )
                     } else {
-                        Rlog.d(TAG, "Accepting call with profile $profile")
+                        Rlog.d(TAG, "Accepting incoming call")
                     }
-                    sipHandler.acceptCall(incomingCallId)
-                    mState = State.ESTABLISHED
-                    sessionListener?.callSessionInitiated(callProfile)
+                    sipHandler.acceptCall(incomingCallId) { accepted ->
+                        if (!accepted) {
+                            readyCheckHandler.post { reportAcceptFailure() }
+                        }
+                    }
                 }
 
                 override fun deflect(deflectNumber: String?) {
@@ -1155,11 +1284,23 @@ sipHandler.imsFailureCallback = {
                 }
 
             }
+            rememberIncomingCallConnectedReporter(incomingCallId) { connectedExtras ->
+                incomingSession.reportConnected(connectedExtras)
+            }
             val frameworkCallListener = notifyIncomingCall(incomingSession, incomingSession.getCallId(), Bundle())
             if (frameworkCallListener != null) {
                 incomingSession.setListener(frameworkCallListener)
             } else {
                 Rlog.w(TAG, "Framework rejected incoming IMS call ${incomingSession.getCallId()}")
+                forgetIncomingCallListener(incomingCallId)
+            }
+        }
+        sipHandler.onIncomingCallConnected = { _: Object, extras: Map<String, String> ->
+            val callId = extras["call-id"]?.takeIf { it.isNotBlank() }
+            if (callId == null) {
+                Rlog.w(TAG, "Incoming call connected without Call-ID: extras=$extras")
+            } else {
+                readyCheckHandler.post { reportIncomingCallConnected(callId, extras) }
             }
         }
         sipHandler.onHeldForegroundCallAutoResumed = autoResume@{ _: Object, extras: Map<String, String> ->
@@ -1243,19 +1384,31 @@ sipHandler.imsFailureCallback = {
                         ((callStartFailed || outgoingCall) && outgoingCallSipCallId == null))
 
             if (matchesOutgoingCall) {
+                val failureCallback = OutgoingCallFailureCallbackPolicy.select(
+                    callStartFailed = callStartFailed,
+                    progressReported = outgoingCallProgressReported,
+                )
                 Rlog.d(
                     TAG,
                     "Routing outgoing call cancellation to callId=$cancelledCallId " +
-                        "callStartFailed=$callStartFailed outgoingCall=$outgoingCall",
+                        "callStartFailed=$callStartFailed " +
+                        "progressReported=$outgoingCallProgressReported " +
+                        "callback=$failureCallback outgoingCall=$outgoingCall",
                 )
-                if (callStartFailed) {
-                    outgoingCallListener?.callSessionInitiatingFailed(reasonInfo)
-                } else {
-                    outgoingCallListener?.callSessionTerminated(reasonInfo)
+                outgoingCallSessionStateReporter?.invoke(
+                    ImsCallSessionImplBase.State.TERMINATED,
+                )
+                when (failureCallback) {
+                    OutgoingCallFailureCallback.INITIATING_FAILED ->
+                        outgoingCallListener?.callSessionInitiatingFailed(reasonInfo)
+                    OutgoingCallFailureCallback.TERMINATED ->
+                        outgoingCallListener?.callSessionTerminated(reasonInfo)
                 }
                 outgoingCallActive = false
                 outgoingCallSipCallId = null
+                outgoingCallProgressReported = false
                 outgoingCallListener = null
+                outgoingCallSessionStateReporter = null
                 outgoingCallAutoResumeReporter = null
                 outgoingCallRemoteHoldReporter = null
             } else {
@@ -1295,8 +1448,29 @@ sipHandler.imsFailureCallback = {
         Rlog.d(TAG, "$slotId onFeatureRemoved")
 
         invalidSubscriptionGraceGeneration++
+        readyCheckHandler.removeCallbacksAndMessages(null)
         unregisterReadyCheckCallback("feature removed")
         retireSipHandler("feature removed")
+        readyCheckExecutor.shutdownNow()
+
+        synchronized(incomingCallListenersLock) {
+            incomingCallListenersByCallId.clear()
+            incomingCallProfilesByCallId.clear()
+            incomingCallConnectedReportersByCallId.clear()
+            lastIncomingCallListener = null
+        }
+        outgoingCallSessionStateReporter?.invoke(
+            ImsCallSessionImplBase.State.TERMINATED,
+        )
+        outgoingCallListener = null
+        outgoingCallSessionStateReporter = null
+        outgoingCallAutoResumeReporter = null
+        outgoingCallRemoteHoldReporter = null
+        outgoingCallActive = false
+        outgoingCallSipCallId = null
+        outgoingCallProgressReported = false
+        sipRegistrationReadyForCapabilities = false
+        telephonyManager = null
 
         frameworkSubId = SubscriptionManager.INVALID_SUBSCRIPTION_ID
         featureInitialized = false
@@ -1310,7 +1484,7 @@ sipHandler.imsFailureCallback = {
     }
 
     override fun shouldProcessCall(numbers: Array<out String>): Int {
-        Rlog.d(TAG, "Should process call? ${numbers.contentToString()}")
+        Rlog.d(TAG, "Should process call count=${numbers.size}")
 
         val csfbNumber = numbers.firstOrNull { number ->
             this::sipHandler.isInitialized &&

@@ -66,11 +66,12 @@ behaviour before assuming the SIP call path failed.
 
 ## Recent carrier-policy and recovery changes
 
-Carrier-specific SIP behavior is now collected in `SipCarrierPolicy` /
+Carrier-specific SIP behavior is collected in `SipCarrierPolicy` /
 `SipCarrierSettings` instead of being scattered across REGISTER, outgoing INVITE,
-SMS, and dial-string call paths. The current in-code policy table is intentionally
-small and can later become an XML/resource-backed carrier config once the policy
-surface stabilizes.
+SMS, and dial-string call paths. Typed defaults remain in code; operator
+exceptions are loaded from `res/xml/sip_carrier_policies.xml` using MCC/MNC and
+optional Android carrier-ID selectors. See `docs/carrier-policies.md` for the
+schema and public reference sources.
 
 The current policy model covers:
 
@@ -256,7 +257,21 @@ Use the Soong/LineageOS build. This is the intended build path.
 
 `Android.bp` builds `PhhIms` as a privileged platform-signed app using `platform_apis: true`, so it can access the internal telephony/IMS APIs required by `MmTelFeature`, `ImsConfigImplBase`, `Rlog`, and friends.
 
+The JVM regression tests also require a full private-platform API stub matching
+the target build. Point Gradle at the generated framework stub/classes JAR from
+that AOSP or LineageOS build; a public or `current/system` SDK JAR is not enough:
+
+```sh
+./gradlew -PplatformApiJar=/path/to/platform-apis.jar testDebugUnitTest
+```
+
 No Gradle build or public SDK modification is needed for production ROM builds.
+
+For a standalone Gradle build, `build.sh` no longer uses bundled signing
+material. Set `PHHIMS_SIGNING_CERT` and `PHHIMS_SIGNING_KEY` to explicit
+SignApk-compatible files if a platform-signed output is required. Without both
+variables, the built APK is copied to `app.apk` without platform signing. Never
+commit ROM platform private keys to this repository.
 
 The AEC wrapper is self-contained and does not depend on Android's
 `external/webrtc`. The Soong path compiles the pinned AEC3 sources and links the

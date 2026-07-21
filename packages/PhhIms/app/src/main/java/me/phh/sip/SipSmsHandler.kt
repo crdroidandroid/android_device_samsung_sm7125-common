@@ -23,6 +23,7 @@ internal class SipSmsHandler(
     private val smsSipFailureListener: (String, Int) -> Unit = { _, _ -> },
     private val sipWriteFailureListener: (String) -> Unit,
     private val timeoutScheduler: (Long, () -> Unit) -> Unit,
+    private val registrationTechProvider: () -> Int,
 ) {
     var onSmsReceived: ((Int, String, ByteArray) -> Unit)? = null
     var onSmsStatusReportReceived: ((Int, String, ByteArray) -> Unit)? = null
@@ -168,11 +169,29 @@ internal class SipSmsHandler(
         }
     }
 
-    fun clearState() {
-        smsLock.withLock {
+    fun clearState(reason: String = "IMS state reset") {
+        val pending = smsLock.withLock {
+            val drained = pendingOutgoingSmsByCallId.values
+                .distinctBy { it.callId }
+                .toList()
             smsHeadersMap.clear()
             pendingOutgoingSmsByCallId.clear()
             pendingOutgoingSmsByRef.clear()
+            drained
+        }
+
+        pending.forEach { outgoing ->
+            responseCallbackRemover(outgoing.callId)
+            Rlog.w(
+                tag,
+                "Failing pending outgoing SMS during state reset: " +
+                    "reason=$reason ref=${outgoing.ref} callId=${outgoing.callId}",
+            )
+            try {
+                outgoing.failCb()
+            } catch (t: Throwable) {
+                Rlog.d(tag, "Failed reporting outgoing SMS state reset", t)
+            }
         }
     }
 
@@ -183,7 +202,7 @@ internal class SipSmsHandler(
             return 500
         }
 
-        Rlog.d(tag, "Decoded SMS type ${sms.type}, ${sms.pdu?.toString()}")
+        Rlog.d(tag, "Decoded SMS type=${sms.type} pduBytes=${sms.pdu?.size ?: 0}")
         when (sms.type) {
             SmsType.RP_DATA_FROM_NETWORK -> {
                 val receivedCb = onSmsReceived
@@ -192,7 +211,6 @@ internal class SipSmsHandler(
                     return 500
                 }
 
-                val token = smsLock.withLock { smsToken++ }
                 val dest = request.headers["from"]!![0]
                     .getParams()
                     .component1()
@@ -200,7 +218,11 @@ internal class SipSmsHandler(
                     .trimEnd('>')
                 val callId = request.headers["call-id"]!![0]
                 val cseq = request.headers["cseq"]!![0]
-                smsHeadersMap[token] = smsHeaders(dest, callId, cseq)
+                val token = smsLock.withLock {
+                    val nextToken = smsToken++
+                    smsHeadersMap[nextToken] = smsHeaders(dest, callId, cseq)
+                    nextToken
+                }
 
                 try {
                     receivedCb(token, "3gpp", sms.pdu!!)
@@ -270,6 +292,11 @@ internal class SipSmsHandler(
         successCb: (() -> Unit),
         failCb: (() -> Unit),
     ) {
+        if (!carrierSettings.smsIpEnabled(registrationTechProvider())) {
+            Rlog.w(tag, "Carrier profile disables SMS over IMS on this access")
+            failCb()
+            return
+        }
         val smsManager = ctxt.getSystemService(SmsManager::class.java).createForSubscriptionId(subId)
         val smscIdentity = try {
             val i = smsManager
@@ -280,14 +307,14 @@ internal class SipSmsHandler(
         } catch (t: Throwable) {
             null
         }
-        Rlog.d(tag, "Got smscIdentity $smscIdentity")
+        Rlog.d(tag, "SMSC identity available=${smscIdentity != null}")
 
         val frameworkSmsc = normalizeSmscNumber(smsSmsc)
         val identitySmsc = normalizeSmscNumber(smscIdentity?.host)
         val managerSmsc = try {
             val smscStr = smsManager.smscAddress
             val parsed = normalizeSmscNumber(smscStr)
-            Rlog.d(tag, "Got smsc $smscStr, parsed $parsed")
+            Rlog.d(tag, "SMSC manager address available=${parsed != null}")
             parsed
         } catch (t: Throwable) {
             Rlog.d(tag, "smscAddress failed", t)
@@ -377,15 +404,29 @@ internal class SipSmsHandler(
         // SipSmsEncodeSms(), so keep it null when we genuinely do not know it.
         val rpSmsc = smsc?.let { if (it.startsWith("+")) it else "+$it" }
         val data = SipSmsEncodeSms(ref.toByte(), rpSmsc, pdu)
-        Rlog.d(tag, "sending sms ${data.toHex()} to rawSmsc=$rawSmsc smsc=$smsc rpSmsc=$rpSmsc")
+        Rlog.d(
+            tag,
+            "Encoding outgoing IMS SMS bodyBytes=${data.size} " +
+                "frameworkSmsc=${frameworkSmsc != null} identitySmsc=${identitySmsc != null} " +
+                "managerSmsc=${managerSmsc != null}",
+        )
 
         val smscSipIdentity = smscIdentity?.toString()?.let { normalizeSipTarget(it) }
         val requestUri = carrierSettings.smsRequestUri(realm, smsc, smscSipIdentity)
         val dest = carrierSettings.smsToUri(realm, requestUri, smsc, smscSipIdentity)
         if (useSingTelSmsPolicy) {
-            Rlog.d(tag, "Using SingTel IMS SMS target requestUri=$requestUri dest=$dest rawSmsc=$rawSmsc smsc=$smsc rpSmsc=$rpSmsc")
+            Rlog.d(tag, "Using carrier-configured IMS SMS request and To URI shape")
         }
 
+        val securityHeaders = if (carrierSettings.ipsecSupported) {
+            """
+                Supported: sec-agree, path
+                Require: sec-agree
+                Proxy-Require: sec-agree
+            """.trimIndent()
+        } else {
+            "Supported: path"
+        }
         val msg = SipRequest(
             SipMethod.MESSAGE,
             requestUri,
@@ -396,9 +437,7 @@ internal class SipSmsHandler(
                 P-Asserted-Identity: <$mySip>
                 Expires: 7200
                 Content-Type: application/vnd.3gpp.sms
-                Supported: sec-agree, path
-                Require: sec-agree
-                Proxy-Require: sec-agree
+                $securityHeaders
                 Allow: MESSAGE
                 Accept-Contact: *;+g.3gpp.smsip;require;explicit
                 Request-Disposition: no-fork
@@ -429,9 +468,9 @@ internal class SipSmsHandler(
             }
         }
 
-        Rlog.d(tag, "Sending $msg")
+        Rlog.d(tag, "Sending ${msg.safeLogSummary()}")
         val writer = writerProvider()
-        val writeLabel = "outgoing SMS MESSAGE ref=$ref requestUri=$requestUri dest=$dest"
+        val writeLabel = "outgoing SMS MESSAGE ref=$ref"
         if (!writeSmsSipBytesWithFlush(writer, writeLabel, msg.toByteArray())) {
             responseCallbackRemover(callId)
             failPendingOutgoingSmsForWriteFailure(callId, writeLabel)
@@ -442,13 +481,22 @@ internal class SipSmsHandler(
     fun sendSmsAck(token: Int, ref: Int, error: Boolean) {
         Rlog.d(tag, "sending sms ack")
         val body = SipSmsEncodeAck(ref.toByte())
-        val headers = smsHeadersMap.remove(token) ?: return
+        val headers = smsLock.withLock { smsHeadersMap.remove(token) } ?: return
 
         // Do not send ACK on framework error. Should we send an error report?
         if (error) {
             return
         }
 
+        val securityHeaders = if (carrierSettings.ipsecSupported) {
+            """
+                Proxy-Require: sec-agree
+                Require: sec-agree
+                Supported: path, gruu, sec-agree
+            """.trimIndent()
+        } else {
+            "Supported: path"
+        }
         val msg = SipRequest(
             SipMethod.MESSAGE,
             headers.dest,
@@ -456,10 +504,8 @@ internal class SipSmsHandler(
                 Cseq: ${headers.cseq}
                 In-Reply-To: ${headers.callId}
                 Content-Type: application/vnd.3gpp.sms
-                Proxy-Require: sec-agree
-                Require: sec-agree
+                $securityHeaders
                 Allow: MESSAGE
-                Supported: path, gruu, sec-agree
                 Request-Disposition: no-fork
                 Accept-Contact: *;+g.3gpp.smsip
             """.toSipHeadersMap(),
@@ -470,7 +516,7 @@ internal class SipSmsHandler(
         val callId = msg.headers["call-id"]!![0]
         responseCallbackSetter(callId) { true }
 
-        Rlog.d(tag, "Sending $msg")
+        Rlog.d(tag, "Sending ${msg.safeLogSummary()}")
         val writer = writerProvider()
         val writeLabel = "outgoing SMS ACK ref=$ref"
         if (!writeSmsSipBytesWithFlush(writer, writeLabel, msg.toByteArray())) {

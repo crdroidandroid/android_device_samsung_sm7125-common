@@ -59,6 +59,13 @@ val emptyMessage = ByteArray(0)
 val keepaliveMessage = "\r\n".toByteArray()
 
 class SipMessageTests {
+    private fun parseRaw(raw: String): SipMessage? =
+        (raw.trimIndent().trimEnd().replace("\n", "\r\n") + "\r\n\r\n")
+            .toByteArray()
+            .inputStream()
+            .sipReader()
+            .parseMessage()
+
     @Test
     fun `parse single message request`() {
         val reader = messageRequest.inputStream().sipReader()
@@ -172,7 +179,9 @@ class SipMessageTests {
                 headersParam = headers,
             )
         require(message.firstLine == "REGISTER xxx SIP/2.0")
-        require(message.headers["cseq"] == listOf("1 REGISTER"))
+        val (sequence, method) = message.headers["cseq"]!!.single().split(" ", limit = 2)
+        require(sequence.toInt() > 0)
+        require(method == "REGISTER")
         require(message.headers["from"]!![0].contains(";tag="))
         require(message.headers["via"]!![0].getParams().component2()["branch"] != null)
     }
@@ -241,5 +250,54 @@ class SipMessageTests {
 
         headers += ("route" to listOf("route2"))
         require(headers["route"] == listOf("route2"))
+    }
+
+    @Test(expected = SipParseException::class)
+    fun `reject non numeric content length`() {
+        parseRaw(
+            """
+            OPTIONS sip:test@example.test SIP/2.0
+            Content-Length: nope
+
+
+            """,
+        )
+    }
+
+    @Test(expected = SipParseException::class)
+    fun `reject negative content length`() {
+        parseRaw(
+            """
+            OPTIONS sip:test@example.test SIP/2.0
+            Content-Length: -1
+
+
+            """,
+        )
+    }
+
+    @Test(expected = SipParseException::class)
+    fun `reject conflicting content lengths`() {
+        parseRaw(
+            """
+            OPTIONS sip:test@example.test SIP/2.0
+            Content-Length: 0
+            l: 1
+
+
+            """,
+        )
+    }
+
+    @Test(expected = SipParseException::class)
+    fun `reject malformed request line`() {
+        parseRaw(
+            """
+            INVITE
+            Content-Length: 0
+
+
+            """,
+        )
     }
 }

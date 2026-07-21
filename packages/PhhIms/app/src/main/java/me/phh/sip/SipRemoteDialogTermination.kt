@@ -4,6 +4,13 @@ import java.io.OutputStream
 
 internal object SipRemoteDialogTermination {
 
+    fun localDialogRequestWriter(
+        incomingResponseWriter: OutputStream?,
+        registeredDialogWriter: OutputStream?,
+        fallbackWriter: () -> OutputStream,
+    ): OutputStream =
+        incomingResponseWriter ?: registeredDialogWriter ?: fallbackWriter()
+
 
 
 
@@ -136,7 +143,7 @@ internal object SipRemoteDialogTermination {
         )
 
     fun byeLog(request: SipRequest): String =
-        "Sending BYE $request"
+        "Sending ${request.safeLogSummary()}"
 
     fun byeWriteLabel(): String = "SipHandler bye"
 
@@ -186,7 +193,7 @@ internal object SipRemoteDialogTermination {
     }
 
     fun lateCancelOkLog(response: SipResponse): String =
-        "Sending explicit 200 OK to late CANCEL: $response"
+        "Sending explicit 200 OK to late CANCEL: ${response.safeLogSummary()}"
 
     fun cancelOkResponse(
         request: SipRequest,
@@ -201,7 +208,7 @@ internal object SipRemoteDialogTermination {
     }
 
     fun cancelOkLog(response: SipResponse): String =
-        "Sending 200 OK to CANCEL $response"
+        "Sending 200 OK to CANCEL ${response.safeLogSummary()}"
 
     fun cancelledInviteResponse(
         request: SipRequest,
@@ -217,7 +224,7 @@ internal object SipRemoteDialogTermination {
     }
 
     fun cancelledInviteLog(response: SipResponse): String =
-        "Sending 487 for cancelled INVITE $response"
+        "Sending 487 for cancelled INVITE ${response.safeLogSummary()}"
 
     fun writeResponse(
         responseWriter: OutputStream,

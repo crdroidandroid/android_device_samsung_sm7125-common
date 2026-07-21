@@ -6,6 +6,7 @@ import java.net.Inet6Address
 object SipContactHeaders {
     private const val MMTEL_CONTACT_FEATURES =
         "+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel\";+g.3gpp.smsip;audio"
+    private const val SMS_ONLY_CONTACT_FEATURES = "+g.3gpp.smsip"
 
     fun localEndpoint(socket: SipConnection, serverPort: Int): String {
         val address = socket.gLocalAddr()
@@ -27,8 +28,35 @@ object SipContactHeaders {
         localEndpoint: String,
         transport: String,
         sipInstance: String,
-    ): String =
-        """<sip:$userPart@$localEndpoint;transport=$transport>;expires=7200;+sip.instance="$sipInstance";$MMTEL_CONTACT_FEATURES"""
+        smsIpEnabled: Boolean = true,
+    ): String {
+        val features = if (smsIpEnabled) {
+            MMTEL_CONTACT_FEATURES
+        } else {
+            "+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel\";audio"
+        }
+        return """<sip:$userPart@$localEndpoint;transport=$transport>;expires=7200;+sip.instance="$sipInstance";$features"""
+    }
+
+    fun registrationContact(
+        userPart: String,
+        localEndpoint: String,
+        transport: String,
+        sipInstance: String,
+        voiceEnabled: Boolean,
+        smsIpEnabled: Boolean = true,
+        expiresSeconds: Int = 7200,
+    ): String {
+        val serviceFeatures = when {
+            voiceEnabled && smsIpEnabled -> MMTEL_CONTACT_FEATURES
+            voiceEnabled ->
+                "+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mmtel\";audio"
+            smsIpEnabled -> SMS_ONLY_CONTACT_FEATURES
+            else -> ""
+        }
+        return """<sip:$userPart@$localEndpoint;transport=$transport>;expires=$expiresSeconds;+sip.instance="$sipInstance";$serviceFeatures"""
+            .trimEnd(';')
+    }
 
     fun viaHeaders(socket: SipConnection, localEndpoint: String): SipHeadersMap {
         val transport = if (socket is SipConnectionTcp) "TCP" else "UDP"

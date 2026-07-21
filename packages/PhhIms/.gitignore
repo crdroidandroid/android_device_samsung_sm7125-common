@@ -8,6 +8,7 @@
 /.idea/navEditor.xml
 /.idea/assetWizardSettings.xml
 .DS_Store
+__pycache__/
 /build
 /captures
 .externalNativeBuild
@@ -17,3 +18,8 @@ local.properties
 # Samsung HAL binaries and derived disassembly — not redistributable
 RE/binaries/
 RE/dumps/
+app.apk
+keys/*.pk8
+keys/*.pem
+keys/*.jks
+keys/*.keystore

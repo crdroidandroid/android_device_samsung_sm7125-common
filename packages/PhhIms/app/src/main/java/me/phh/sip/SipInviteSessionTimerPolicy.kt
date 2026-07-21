@@ -24,11 +24,11 @@ data class SipInviteRetryHeaders(
 
 class SipInviteSessionTimerPolicy(
     private val tag: String,
+    private val defaultMinSeSeconds: Int = 90,
+    private val defaultSessionExpiresSeconds: Int = 1800,
 ) {
     private val learnedMinSeByRealm = mutableMapOf<String, Int>()
 
-    private val defaultMinSeSeconds = 90
-    private val defaultSessionExpiresSeconds = 1800
     private val minSeFloorSeconds = 90
     private val minSeCeilingSeconds = 86400
 

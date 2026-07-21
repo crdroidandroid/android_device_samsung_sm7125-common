@@ -6,6 +6,7 @@ import android.media.*
 import android.net.*
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.PowerManager
 import android.os.SystemClock
 import android.telephony.Rlog
 import android.telephony.TelephonyManager
@@ -36,6 +37,8 @@ class SipHandler(
         private const val RTP_SOCKET_RECEIVE_TIMEOUT_MS = 20
 
         private const val INCOMING_ACCEPT_IMS_ACCESS_CHANGE_GUARD_MS = 1_200L
+        private const val REGISTER_REFRESH_RETRY_RESPONSE_TIMEOUT_MS = 15_000L
+        private const val REGISTER_REFRESH_RETRY_WAKE_LOCK_GRACE_MS = 1_000L
     }
 
     val myHandler = Handler(HandlerThread("PhhMmTelFeature").apply { start() }.looper)
@@ -54,6 +57,9 @@ class SipHandler(
     private val amrWbMediaCodecAvailable: Boolean by lazy {
         SipAudioCodecNegotiator.isMediaCodecAvailableFor(TAG, SipAudioCodecs.AMR_WB)
     }
+    private val carrierAmrWbMediaCodecAvailable: Boolean
+        get() = amrWbMediaCodecAvailable &&
+            carrierSettings.allowsAudioCodec("AMR-WB", "AMRBE-WB")
 
     private val imsUplinkGainQ8: Int by lazy {
         SipUplinkGain.configuredGainQ8()
@@ -104,7 +110,11 @@ class SipHandler(
         slotId = slotId,
         subId = subId,
     )
-    private val carrierSettings = SipCarrierSettings.fromSimOperator(homeOperatorForIms)
+    private val carrierSettings = SipCarrierSettings.fromContext(
+        context = ctxt,
+        telephonyManager = subTelephonyManager,
+        simOperator = homeOperatorForIms,
+    )
     private val mcc = carrierSettings.mcc
     private val mnc = carrierSettings.mnc
     private val imsi = subTelephonyManager.subscriberId
@@ -132,7 +142,7 @@ class SipHandler(
     }
 
 
-    val isControlSocketUdp = carrierSettings.isControlSocketUdp
+    val isControlSocketUdp = carrierSettings.useUdpControlSocket()
     val requireNonsessAka = carrierSettings.requireNonsessAka
 
     //private val realm = "ims.mnc$mnc.mcc$mcc.3gppnetwork.org"
@@ -220,6 +230,16 @@ class SipHandler(
 
 
     private var registerCounter = 1
+    private val registerRefreshRetryAttempted = AtomicBoolean(false)
+    private val registerRefreshRetryGeneration = AtomicInteger(0)
+    private val registerRefreshRetryWakeLock by lazy {
+        ctxt.getSystemService(PowerManager::class.java).newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "$TAG:RegisterRefreshRetry",
+        ).apply {
+            setReferenceCounted(false)
+        }
+    }
     private var registerHeaders =
         """
         From: <sip:$user>
@@ -238,11 +258,16 @@ class SipHandler(
     private var ipsecResourcesClosed = true
 
     lateinit private var network: Network
+    @Volatile private var activePcscfSipPort = 5060
 
     lateinit private var plainSocket: SipConnection
     lateinit private var socket: SipConnection
     lateinit private var serverSocket: SipConnectionTcpServer
     lateinit private var serverSocketUdp: SipConnectionUdpServer
+    private val mainSipFlowRecoveryLock = Any()
+    private val mainSipFlowAwaitingOnDemandRecovery = AtomicBoolean(false)
+    private val mainSipFlowRecoveredSinceRegistration = AtomicBoolean(false)
+    private val mainSipFlowOpenedElapsedRealtimeMs = AtomicLong(0L)
     private var reliableSequenceCounter = 67
     private val incomingFinalResponseSent = AtomicBoolean(false)
     private val incomingAcceptedAwaitingAck = AtomicBoolean(false)
@@ -255,6 +280,12 @@ class SipHandler(
 
     private fun rememberTerminatedIncomingCall(callId: String, reason: String) {
         terminatedIncomingCallIds.remember(callId, "duplicate INVITE guard: $reason")
+        // Keep the flow briefly for a final response or a late retransmission,
+        // then release it even if no reconnect clears the dispatcher.
+        myHandler.postDelayed(
+            { dispatcher.removeWriterForCallId(callId) },
+            5_000L,
+        )
     }
 
     private fun wasRecentlyTerminatedIncomingCall(callId: String): Boolean {
@@ -262,8 +293,29 @@ class SipHandler(
     }
 
     private val dispatcher = SipDispatcher(TAG)
+    private val callSignalingKeepAlive = SipCallSignalingKeepAlive(
+        tag = TAG,
+        context = ctxt,
+        policy = carrierSettings.callSignalingKeepAlivePolicy,
+        network = { if (this::network.isInitialized) network else null },
+        remoteAddress = { if (this::pcscfAddr.isInitialized) pcscfAddr else null },
+        remotePort = { activePcscfSipPort },
+    )
+    private val callSetupTimers = SipCallSetupTimers(
+        tag = TAG,
+        handler = myHandler,
+        policy = { carrierSettings.callSetupTimerPolicy },
+        onOutgoingTimeout = { callId, reason ->
+            handleOutgoingCallSetupTimeout(callId, reason)
+        },
+        onIncomingTimeout = { callId -> handleIncomingRingingTimeout(callId) },
+    )
 
-    private val inviteSessionTimerPolicy = SipInviteSessionTimerPolicy(TAG)
+    private val inviteSessionTimerPolicy = SipInviteSessionTimerPolicy(
+        tag = TAG,
+        defaultMinSeSeconds = carrierSettings.minSeSeconds,
+        defaultSessionExpiresSeconds = carrierSettings.sessionExpiresSeconds,
+    )
     private val smsFallbackPolicy = SipSmsFallbackPolicy(TAG, carrierSettings.smsPolicy)
     /*
      * UDP SIP responses must be sent on the same 5-tuple that delivered the
@@ -302,7 +354,32 @@ class SipHandler(
 
         private fun sendDatagram(bytes: ByteArray) {
             if (bytes.isEmpty()) return
-            val firstLine = bytes.toString(Charsets.US_ASCII)
+            val route = SipUdpResponseRouting.route(
+                responseBytes = bytes,
+                sourceAddress = remoteAddress,
+                sourcePort = remotePort,
+                targetPolicy = carrierSettings.policy.udpResponseTargetPolicy,
+            )
+            val destinationAddress = route.destinationAddress ?: try {
+                network.getByName(route.destinationHost!!)
+            } catch (t: Throwable) {
+                Rlog.w(
+                    TAG,
+                    "Could not resolve SIP Via response target " +
+                        "${route.destinationHost}; using packet source",
+                    t,
+                )
+                remoteAddress
+            }
+            val destinationPort = if (
+                route.destinationAddress == null && destinationAddress === remoteAddress
+            ) {
+                remotePort
+            } else {
+                route.destinationPort
+            }
+            val routedBytes = route.bytes
+            val firstLine = routedBytes.toString(Charsets.US_ASCII)
                 .lineSequence()
                 .firstOrNull()
                 .orEmpty()
@@ -310,14 +387,15 @@ class SipHandler(
             val channel = serverSocketUdp.socket.channel
             if (channel != null) {
                 val sent = channel.send(
-                    java.nio.ByteBuffer.wrap(bytes),
-                    java.net.InetSocketAddress(remoteAddress, remotePort),
+                    java.nio.ByteBuffer.wrap(routedBytes),
+                    java.net.InetSocketAddress(destinationAddress, destinationPort),
                 )
-                if (sent != bytes.size) {
+                if (sent != routedBytes.size) {
                     Rlog.w(
                         TAG,
-                        "UDP SIP response partial send bytes=$sent expected=${bytes.size} " +
-                            "target=$remoteAddress:$remotePort firstLine=$firstLine",
+                        "UDP SIP response partial send bytes=$sent " +
+                            "expected=${routedBytes.size} target=$destinationAddress:" +
+                            "$destinationPort firstLine=$firstLine",
                     )
                 }
             } else {
@@ -325,22 +403,25 @@ class SipHandler(
                 // contend with receive(), but keeps the writer functional on all socket
                 // construction paths.
                 serverSocketUdp.socket.send(
-                    DatagramPacket(bytes, bytes.size, remoteAddress, remotePort),
+                    DatagramPacket(
+                        routedBytes,
+                        routedBytes.size,
+                        destinationAddress,
+                        destinationPort,
+                    ),
                 )
             }
 
             Rlog.d(
                 TAG,
-                "UDP SIP response sent bytes=${bytes.size} " +
-                    "target=$remoteAddress:$remotePort firstLine=$firstLine",
+                "UDP SIP response sent bytes=${routedBytes.size} " +
+                    "target=$destinationAddress:$destinationPort " +
+                    "packetSource=$remoteAddress:$remotePort " +
+                    "route=${route.diagnostic} " +
+                    "firstLine=$firstLine",
             )
         }
     }
-
-    // SIP responses must be written back on the same transport flow that delivered the request.
-    // This is especially important for incoming INVITE over the TCP server socket: writing the
-    // 180/200 to the registration/control socket can make the P-CSCF ignore the final response.
-    private val requestWriters = java.util.concurrent.ConcurrentHashMap<String, OutputStream>() 
 
     private val imsNetworkRequestRestarter = ImsNetworkRequestRestarter(
         tag = TAG,
@@ -369,6 +450,24 @@ class SipHandler(
         java.util.concurrent.ConcurrentHashMap<String, Boolean>()
     ) 
     private var imsReady = false
+    @Volatile
+    private var mmtelVoiceEnabled = true
+    private fun carrierAllowsCurrentRoaming(): Boolean =
+        carrierSettings.policy.roamingSupported ||
+            try {
+                !subTelephonyManager.isNetworkRoaming
+            } catch (_: Throwable) {
+                true
+            }
+
+    private fun effectiveVoiceEnabled(): Boolean =
+        mmtelVoiceEnabled &&
+            carrierSettings.voiceEnabled(imsRegistrationTech) &&
+            carrierAllowsCurrentRoaming()
+
+    private fun effectiveSmsIpEnabled(): Boolean =
+        carrierSettings.smsIpEnabled(imsRegistrationTech) &&
+            carrierAllowsCurrentRoaming()
     var imsReadyCallback: (() -> Unit)? = null
     var imsFailureCallback: (() -> Unit)? = null
     var imsRegisteringCallback: ((Int) -> Unit)? = null
@@ -451,12 +550,13 @@ private val smsHandler = SipSmsHandler(
         realmProvider = { realm },
         commonHeadersProvider = { commonHeaders },
         mySipProvider = { mySip },
-        writerProvider = { socket.gWriter() },
+        writerProvider = { mainSipWriterForOutbound("IMS SMS") },
         responseCallbackSetter = { callId, cb -> setResponseCallback(callId, cb) },
         responseCallbackRemover = { callId -> removeResponseCallback(callId) },
         smsSipFailureListener = { smsRealm, statusCode -> smsFallbackPolicy.learnFromSipMessageFailure(smsRealm, statusCode) },
         sipWriteFailureListener = { reason -> reconnectIms(reason) },
         timeoutScheduler = { delayMs, action -> myHandler.postDelayed({ action() }, delayMs) },
+        registrationTechProvider = { imsRegistrationTech },
     )
 
     private val sessionRefresher = SipSessionRefresher(
@@ -552,6 +652,8 @@ private val smsHandler = SipSmsHandler(
 
     private fun stopCallRuntime(reason: String) {
         Rlog.d(TAG, "Stopping call runtime state: $reason")
+        callSetupTimers.cancelAll(reason)
+        callSignalingKeepAlive.stop(reason)
         callStopped.set(true)
         callStarted.set(false)
         threadsStarted.set(false)
@@ -736,24 +838,63 @@ fun setRequestCallback(method: SipMethod, cb: (SipRequest) -> Int) {
 
     fun getRegistrationTech(): Int = imsRegistrationTech
 
+    fun setMmtelVoiceEnabled(enabled: Boolean, reason: String) {
+        if (mmtelVoiceEnabled == enabled) return
+
+        mmtelVoiceEnabled = enabled
+        Rlog.i(TAG, "MMTEL voice enabled=$enabled reason=$reason")
+        myHandler.post {
+            if (mmtelVoiceEnabled != enabled) {
+                Rlog.d(
+                    TAG,
+                    "Skipping stale MMTEL voice REGISTER update: " +
+                        "requested=$enabled current=$mmtelVoiceEnabled reason=$reason",
+                )
+                return@post
+            }
+            if (!imsReady || !this::socket.isInitialized || !this::serverSocket.isInitialized) {
+                Rlog.d(
+                    TAG,
+                    "Deferring REGISTER service-tag update until IMS is ready: " +
+                        "voiceEnabled=$enabled reason=$reason",
+                )
+                return@post
+            }
+
+            try {
+                updateRegistrationContact(socket)
+                Rlog.i(
+                    TAG,
+                    "Refreshing REGISTER service tags after MMTEL voice change: " +
+                        "voiceEnabled=$enabled reason=$reason",
+                )
+                register()
+            } catch (t: Throwable) {
+                recoverAfterPeriodicRegisterFailure(t)
+            }
+        }
+    }
+
     fun handlesSubscription(candidateSubId: Int): Boolean = subId == candidateSubId
 
     private fun isEmergencyDialStringForNormalIms(normalizedNumber: String): Boolean {
         if (normalizedNumber.isBlank()) return false
 
-        if (carrierSettings.isFallbackEmergencyDialString(normalizedNumber)) {
-            return true
-        }
-
-        return try {
+        val platformResult = try {
             subTelephonyManager.isEmergencyNumber(normalizedNumber)
         } catch (t: Throwable) {
             try {
                 telephonyManager.isEmergencyNumber(normalizedNumber)
             } catch (t2: Throwable) {
-                false
+                null
             }
         }
+        if (platformResult != null) return platformResult
+
+        // Only consult an explicit operator overlay when the platform service
+        // is unavailable. A global emergency list can misclassify ordinary
+        // short codes in another country and force an unnecessary CS fallback.
+        return carrierSettings.isFallbackEmergencyDialString(normalizedNumber)
     }
 
     fun shouldForceCsfbForOutgoingDialString(number: String): Boolean {
@@ -831,6 +972,10 @@ fun setRequestCallback(method: SipMethod, cb: (SipRequest) -> Int) {
     }
 
     private fun resetRegistrationStateForConnect() {
+        registerRefreshRetryAttempted.set(false)
+        registerRefreshRetryGeneration.incrementAndGet()
+        releaseRegisterRefreshRetryWakeLock("registration state reset")
+        mainSipFlowRecoveredSinceRegistration.set(false)
         registerCounter = 1
         akaDigest = initialRegisterAuthorization()
         val registerCallId = generateCallId()
@@ -851,10 +996,10 @@ fun setRequestCallback(method: SipMethod, cb: (SipRequest) -> Int) {
     }
 
     private fun getPcscfServers(lp: LinkProperties): List<InetAddress> =
-        ImsNetworkState.getPcscfServers(lp)
+        ImsNetworkState.getPcscfServers(lp, carrierSettings.ipVersionPolicy)
 
     private fun getImsLocalAddress(lp: LinkProperties): InetAddress? =
-        ImsNetworkState.getImsLocalAddress(lp)
+        ImsNetworkState.getImsLocalAddress(lp, carrierSettings.ipVersionPolicy)
 
     private fun cleanupExpiredBlockedPcscfs(nowMs: Long = SystemClock.uptimeMillis()) {
         val expiredPcscfs = blockedPcscfUntilUptimeMs.entries
@@ -975,13 +1120,20 @@ fun setRequestCallback(method: SipMethod, cb: (SipRequest) -> Int) {
         sessionRefresher.cancelAll("IMS reconnect")
         dispatcher.clearCallbacks()
         dispatcher.clearWriters()
-        smsHandler.clearState()
+        smsHandler.clearState("IMS reconnect")
     }
 
 
     private fun closeSipTransports(reason: String) {
         Rlog.w(TAG, "Closing SIP transports: $reason")
-        val newGeneration = sipReaderGeneration.incrementAndGet()
+        callSignalingKeepAlive.stop("SIP transports closing: $reason")
+        val newGeneration = synchronized(mainSipFlowRecoveryLock) {
+            mainSipFlowAwaitingOnDemandRecovery.set(false)
+            mainSipFlowRecoveredSinceRegistration.set(false)
+            mainSipFlowOpenedElapsedRealtimeMs.set(0L)
+            releaseRegisterRefreshRetryWakeLock("SIP transports closing")
+            sipReaderGeneration.incrementAndGet()
+        }
         Rlog.w(TAG, "Invalidated SIP reader generation=$newGeneration while closing transports: $reason")
         BoundedCloser.close(TAG, "plainSocket") { if (this::plainSocket.isInitialized) plainSocket.close() }
         BoundedCloser.close(TAG, "socket") { if (this::socket.isInitialized) socket.close() }
@@ -1004,6 +1156,7 @@ fun setRequestCallback(method: SipMethod, cb: (SipRequest) -> Int) {
             label = label,
             timeoutMs = timeoutMs,
         )
+        activePcscfSipPort = remotePort
     }
 
     private fun allocateSecurityParameterIndexWithWatchdog(
@@ -1106,10 +1259,6 @@ fun setRequestCallback(method: SipMethod, cb: (SipRequest) -> Int) {
         } else if (wasReady) {
             Rlog.w(TAG, "Suppressing framework IMS deregistration during transient reconnect cleanup: $reason")
         }
-        // Release IPsec SPIs and server transforms before closing SIP sockets.
-        // Closing sockets first can leave XFRM state holding a reference to the
-        // ipsecX netdev while the kernel tears it down, causing
-        // unregister_netdevice refcount=2 → use-after-free in dst_destroy.
         closeIpsecResources(reason)
         closeSipTransports(reason)
     }
@@ -1204,14 +1353,15 @@ fun setRequestCallback(method: SipMethod, cb: (SipRequest) -> Int) {
             android.telephony.AccessNetworkConstants.TRANSPORT_TYPE_WLAN,
         )
 
-        val iwlanReady =
-            iwlanRegistration?.isNetworkRegistered == true &&
-                iwlanRegistration.accessNetworkTechnology == TelephonyManager.NETWORK_TYPE_IWLAN
+        val iwlanReady = iwlanRegistration?.let { registration ->
+            registration.isNetworkRegistered &&
+                registration.accessNetworkTechnology == TelephonyManager.NETWORK_TYPE_IWLAN
+        } == true
 
         Rlog.d(
             TAG,
             "WFC Wi-Fi preferred IWLAN readiness: ready=$iwlanReady " +
-                "reg=${iwlanRegistration?.networkRegistrationState} " +
+                "registered=${iwlanRegistration?.isNetworkRegistered} " +
                 "rat=${iwlanRegistration?.accessNetworkTechnology}",
         )
         return iwlanReady
@@ -1325,11 +1475,9 @@ fun onWfcDisabled(reason: String) {
 
             val dropReason = "WFC disabled while registered over IWLAN: $reason"
             Rlog.w(TAG, "Pre-dropping IWLAN IMS without immediate reconnect: $dropReason")
-            // Eagerly release IPsec SPIs and transforms before the IWLAN network
-            // tears down ipsec1, to avoid unregister_netdevice refcount race.
-            closeIpsecResources("WFC disabled (eager pre-cleanup)")
             pendingCellularReconnectAfterWfcDisable = true
             reconnectController.invalidatePendingReconnects(dropReason)
+            closeIpsecResources("WFC disabled (eager pre-cleanup)")
             dropImsConnection(dropReason)
             abandonnedBecauseOfNoPcscf = false
         }
@@ -1382,6 +1530,177 @@ fun onWfcDisabled(reason: String) {
             return false
         }
         return true
+    }
+
+
+    private fun mainSipFlowRecoveryState(
+        recoverableFlowLoss: Boolean,
+    ): MainSipFlowRecoveryState {
+        val networkUsable =
+            imsReady &&
+                this::network.isInitialized &&
+                this::localAddr.isInitialized &&
+                imsTransportGuard.isUsableForOutgoingCall(
+                    localAddr,
+                    "main SIP TCP flow recovery",
+                )
+
+        return MainSipFlowRecoveryState(
+            controlTransportIsTcp = this::socket.isInitialized && socket is SipConnectionTcp,
+            imsReady = imsReady,
+            ipsecResourcesOpen = this::ipsecSettings.isInitialized && !ipsecResourcesClosed,
+            inboundServerListening =
+                this::serverSocket.isInitialized && !serverSocket.serverSocket.isClosed,
+            networkUsable = networkUsable,
+            recoverableFlowLoss = recoverableFlowLoss,
+            reconnecting = reconnectController.isReconnecting(),
+            accessMigrationPending = pendingCellularReconnectAfterWfcDisable,
+            activeOrPendingCall = hasActiveOrPendingCallForImsReconnectDeferral(),
+        )
+    }
+
+
+    private fun preserveRegistrationAfterMainTcpFlowLoss(
+        connection: SipConnectionTcp,
+        readerGeneration: Int,
+    ): Boolean {
+        synchronized(mainSipFlowRecoveryLock) {
+            if (
+                readerGeneration != sipReaderGeneration.get() ||
+                !this::socket.isInitialized ||
+                socket !== connection
+            ) {
+                return false
+            }
+
+            val flowOpenedElapsedRealtimeMs =
+                mainSipFlowOpenedElapsedRealtimeMs.get()
+            val flowAgeMs = if (flowOpenedElapsedRealtimeMs > 0L) {
+                maxOf(
+                    0L,
+                    SystemClock.elapsedRealtime() - flowOpenedElapsedRealtimeMs,
+                )
+            } else {
+                0L
+            }
+            val recoveryState = mainSipFlowRecoveryState(
+                recoverableFlowLoss =
+                    MainSipFlowRecoveryPolicy.isRecoverableFlowAge(flowAgeMs),
+            )
+            if (!MainSipFlowRecoveryPolicy.mayKeepRegistration(recoveryState)) {
+                Rlog.d(
+                    TAG,
+                    "Main TCP flow is not eligible for registration-preserving recovery: " +
+                        "$recoveryState flowAgeMs=$flowAgeMs",
+                )
+                return false
+            }
+
+            val expiredWriter = try {
+                connection.gWriter()
+            } catch (_: Throwable) {
+                null
+            }
+            mainSipFlowAwaitingOnDemandRecovery.set(true)
+            connection.closeTransportForReconnect()
+            expiredWriter?.let { dispatcher.removeWritersFor(it) }
+
+            Rlog.w(
+                TAG,
+                "Protected main SIP TCP flow closed while IMS registration remains valid; " +
+                    "keeping inbound listeners/IPsec and reopening the flow on demand " +
+                    "after flowAgeMs=$flowAgeMs",
+            )
+            return true
+        }
+    }
+
+
+    private fun ensureMainSipFlowForOutbound(reason: String): Boolean {
+        if (!this::socket.isInitialized) return false
+
+        val observedConnection = socket
+        if (observedConnection !is SipConnectionTcp || observedConnection.isConnected()) {
+            return true
+        }
+
+        synchronized(mainSipFlowRecoveryLock) {
+            if (!this::socket.isInitialized) return false
+            val connection = socket
+            if (connection !is SipConnectionTcp || connection.isConnected()) {
+                return true
+            }
+
+            val recoveryState = mainSipFlowRecoveryState(
+                recoverableFlowLoss = mainSipFlowAwaitingOnDemandRecovery.get(),
+            )
+            if (!MainSipFlowRecoveryPolicy.mayKeepRegistration(recoveryState)) {
+                val reconnectReason =
+                    "protected main SIP TCP flow unavailable before $reason"
+                Rlog.w(
+                    TAG,
+                    "Cannot reopen protected main SIP TCP flow in place; " +
+                        "requesting full IMS reconnect: state=$recoveryState reason=$reason",
+                )
+                if (shouldReconnectAfterSipTransportLoss(reconnectReason)) {
+                    reconnectIms(reconnectReason, delayMs = 0L)
+                }
+                return false
+            }
+
+            val readerGeneration = sipReaderGeneration.get()
+            mainSipFlowAwaitingOnDemandRecovery.set(false)
+            try {
+                Rlog.w(
+                    TAG,
+                    "Reopening protected main SIP TCP flow on demand without IMS AKA: $reason",
+                )
+                connection.reconnectPreservingIpsec()
+            } catch (t: Throwable) {
+                val reconnectReason =
+                    "protected main SIP TCP flow recovery failed before $reason"
+                Rlog.w(
+                    TAG,
+                    "$reconnectReason; requesting full IMS reconnect",
+                    t,
+                )
+                if (shouldReconnectAfterSipTransportLoss(reconnectReason)) {
+                    reconnectIms(reconnectReason, delayMs = 0L)
+                }
+                return false
+            }
+
+            if (
+                readerGeneration != sipReaderGeneration.get() ||
+                !imsReady ||
+                !this::socket.isInitialized ||
+                socket !== connection
+            ) {
+                Rlog.w(
+                    TAG,
+                    "Discarding recovered main SIP TCP flow because IMS state changed: $reason",
+                )
+                connection.closeTransportForReconnect()
+                return false
+            }
+
+            mainSipFlowOpenedElapsedRealtimeMs.set(SystemClock.elapsedRealtime())
+            mainSipFlowRecoveredSinceRegistration.set(true)
+            startMainSipReaderLoop(readerGeneration, connection)
+            Rlog.w(
+                TAG,
+                "Protected main SIP TCP flow reopened without IMS re-registration: $reason",
+            )
+            return true
+        }
+    }
+
+
+    private fun mainSipWriterForOutbound(reason: String): OutputStream {
+        if (!ensureMainSipFlowForOutbound(reason)) {
+            throw IOException("Main SIP flow is unavailable for $reason")
+        }
+        return socket.gWriter()
     }
 
 
@@ -1492,9 +1811,22 @@ fun onWfcDisabled(reason: String) {
         reconnectController.scheduleReconnectRetry(reason, delayMs)
     }
 
-    private fun failConnectAndRetry(reason: String, baseDelayMs: Long = 5000L) {
-        maybeBlockCurrentPcscfForRegistrationFailure(reason)
-        reconnectController.failConnectAndRetry(reason, baseDelayMs)
+    private fun failConnectAndRetry(
+        reason: String,
+        baseDelayMs: Long = carrierSettings.registrationRecoveryPolicy.retryBaseMs,
+        maxDelayMs: Long = carrierSettings.registrationRecoveryPolicy.retryMaxMs,
+        explicitDelayMs: Long? = null,
+        blockCurrentPcscf: Boolean = true,
+    ) {
+        if (blockCurrentPcscf) {
+            maybeBlockCurrentPcscfForRegistrationFailure(reason)
+        }
+        reconnectController.failConnectAndRetry(
+            reason,
+            baseDelayMs,
+            maxDelayMs,
+            explicitDelayMs,
+        )
     }
 
     private fun reconnectIms(reason: String, newNetwork: Network? = null, delayMs: Long = 1000L) {
@@ -1682,7 +2014,7 @@ fun onWfcDisabled(reason: String) {
         reconnectController.markConnected()
 
         installSipCallbacks()
-        handleResponse(regReply)
+        if (registerCallback(regReply)) return
 
         startSipReaderLoops()
     }
@@ -1769,10 +2101,31 @@ fun onWfcDisabled(reason: String) {
             mnc = mnc,
             mcc = mcc,
             preferredPcscf = preferredPcscf,
+            ipVersionPolicy = carrierSettings.ipVersionPolicy,
         )) {
             is ImsNetworkEndpointResolution.Success -> {
                 localAddr = endpoint.localAddr
                 pcscfAddr = endpoint.pcscfAddr
+                if (!carrierSettings.ipVersionPolicy.accepts(localAddr) ||
+                    !carrierSettings.ipVersionPolicy.accepts(pcscfAddr)
+                ) {
+                    Rlog.w(
+                        TAG,
+                        "Carrier IP policy ${carrierSettings.ipVersionPolicy} could " +
+                            "not be satisfied by the IMS bearer; using " +
+                            "local=${localAddr.hostAddress} " +
+                            "pcscf=${pcscfAddr.hostAddress}",
+                    )
+                }
+                if (!carrierSettings.supportsNetwork(imsRegistrationTech)) {
+                    Rlog.w(
+                        TAG,
+                        "IMS bearer access ${registrationTechName(imsRegistrationTech)} " +
+                            "is outside carrier profile networks=" +
+                            "${carrierSettings.policy.supportedNetworks}; " +
+                            "registration continues but services stay disabled",
+                    )
+                }
             }
 
             ImsNetworkEndpointResolution.WaitingForPcscf -> {
@@ -1791,6 +2144,13 @@ fun onWfcDisabled(reason: String) {
 
 
     private fun setupPlainSipSocketsAndSendInitialRegister() {
+        Rlog.i(
+            TAG,
+            "Opening SIP control transport effective=" +
+                "${if (isControlSocketUdp) "UDP" else "TCP"} " +
+                "database=${carrierSettings.transportPolicy} " +
+                "ipsec=${carrierSettings.ipsecSupported} mss=${carrierSettings.mssSize}",
+        )
         plainSocket = if (isControlSocketUdp)
             SipConnectionUdp(network, pcscfAddr, localAddr)
         else
@@ -1817,7 +2177,10 @@ fun onWfcDisabled(reason: String) {
         if (plainRegReply !is SipResponse || plainRegReply.statusCode != 401) {
             Rlog.w(TAG, "Didn't get expected response from initial register, aborting")
             plainSocket.close()
-            failConnectAndRetry("Initial SIP REGISTER did not return 401")
+            recoverFromRegistrationFailure(
+                plainRegReply as? SipResponse,
+                "Initial SIP REGISTER did not return 401",
+            )
             return null
         }
 
@@ -1876,6 +2239,9 @@ fun onWfcDisabled(reason: String) {
 
     private fun connectProtectedSipSocketAndRegister(portS: Int) {
         connectSipSocketWithWatchdog(socket, portS, "IPsec authenticated")
+        if (socket is SipConnectionTcp) {
+            mainSipFlowOpenedElapsedRealtimeMs.set(SystemClock.elapsedRealtime())
+        }
         updateCommonHeaders(socket)
         register()
     }
@@ -1888,6 +2254,16 @@ fun onWfcDisabled(reason: String) {
         akaResult: SipAkaResult,
     ): Int {
         var portS = 5060
+        if (!carrierSettings.ipsecSupported) {
+            if (plainRegReply.headers.containsKey("security-server")) {
+                Rlog.w(
+                    TAG,
+                    "Ignoring unexpected Security-Server because the selected " +
+                        "carrier profile disables IPsec",
+                )
+            }
+            return portS
+        }
         // Check if there is a security-server header in the reply
         if (plainRegReply.headers.containsKey("security-server")) {
             val securityServer = plainRegReply.headers["security-server"]!!
@@ -1915,6 +2291,21 @@ fun onWfcDisabled(reason: String) {
 
             val spiC = securityServerParams["spi-c"]!!.toUInt().toInt()
             val serverSpiC = allocateSecurityParameterIndexWithWatchdog("server SPI-C", pcscfAddr, spiC)
+
+            Rlog.i(
+                TAG,
+                "Selected protected SIP path local=${localAddr.hostAddress} " +
+                    "pcscf=${pcscfAddr.hostAddress} " +
+                    "clientPort=${socket.gLocalPort()} " +
+                    "serverTcpPort=${serverSocket.localPort} " +
+                    "serverUdpPort=${serverSocketUdp.localPort} " +
+                    "portC=${securityServerParams["port-c"]} " +
+                    "portS=${securityServerParams["port-s"]} " +
+                    "spiC=${securityServerParams["spi-c"]} " +
+                    "spiS=${securityServerParams["spi-s"]} " +
+                    "alg=${securityServerParams["alg"]} " +
+                    "ealg=${securityServerParams["ealg"]}",
+            )
 
             ipsecSettings = SipIpsecSettings(
                 clientSpiS = clientSpiS,
@@ -2101,8 +2492,37 @@ fun onWfcDisabled(reason: String) {
             return
         }
 
-        Rlog.w(TAG, "Could not connect, aborting SIP")
-        failConnectAndRetry("Authenticated SIP REGISTER did not return 200")
+        recoverFromRegistrationFailure(
+            regReply as? SipResponse,
+            "Authenticated SIP REGISTER failed",
+        )
+    }
+
+
+    private fun recoverFromRegistrationFailure(
+        response: SipResponse?,
+        fallbackReason: String,
+    ) {
+        val recoveryPolicy = carrierSettings.registrationRecoveryPolicy
+        val decision = SipRegistrationFailurePolicy.decide(response, recoveryPolicy)
+        val status = response?.statusCode
+        if (!decision.retry) {
+            val reason = "REGISTER $status requested permanent stop"
+            Rlog.w(
+                TAG,
+                "$reason for the current IMS session",
+            )
+            dropImsConnection(reason)
+            return
+        }
+
+        val reason = "$fallbackReason with ${status ?: "no response"}"
+        Rlog.w(TAG, "$reason; applying carrier registration recovery policy")
+        failConnectAndRetry(
+            reason = reason,
+            explicitDelayMs = decision.retryAfterMs,
+            blockCurrentPcscf = decision.blockCurrentPcscf,
+        )
     }
 
 
@@ -2270,7 +2690,10 @@ fun onWfcDisabled(reason: String) {
         // - connection to server socket
         // Start both in threads as we're only called here from network callback from which
         // it's better to return.
-        val readerGeneration = sipReaderGeneration.incrementAndGet()
+        val readerGeneration = synchronized(mainSipFlowRecoveryLock) {
+            mainSipFlowAwaitingOnDemandRecovery.set(false)
+            sipReaderGeneration.incrementAndGet()
+        }
         Rlog.d(TAG, "Starting SIP reader loops generation=$readerGeneration")
 
         startMainSipReaderLoop(readerGeneration)
@@ -2292,17 +2715,33 @@ fun onWfcDisabled(reason: String) {
         return true
     }
 
-    private fun startMainSipReaderLoop(readerGeneration: Int) {
+    private fun startMainSipReaderLoop(
+        readerGeneration: Int,
+        mainConnection: SipConnection = socket,
+    ) {
         CoroutineScope(Dispatchers.IO).launch {
+            var cleanStreamEnd = false
             try {
-                while (parseMessage(socket.gReader(), socket.gWriter())) {
+                while (parseMessage(mainConnection.gReader(), mainConnection.gWriter())) {
                 }
-                Rlog.w(TAG, "Main socket got EOF, reconnecting")
+                cleanStreamEnd = true
+                Rlog.w(TAG, "Main socket got EOF")
             } catch (t: Throwable) {
-                Rlog.w(TAG, "Got exception in main/control socket, reconnecting", t)
+                Rlog.w(TAG, "Got exception in main/control socket", t)
             }
 
             if (isStaleSipReaderLoop(readerGeneration, "main/control SIP socket lost")) {
+                return@launch
+            }
+
+            if (
+                cleanStreamEnd &&
+                mainConnection is SipConnectionTcp &&
+                preserveRegistrationAfterMainTcpFlowLoss(
+                    connection = mainConnection,
+                    readerGeneration = readerGeneration,
+                )
+            ) {
                 return@launch
             }
 
@@ -2326,6 +2765,7 @@ fun onWfcDisabled(reason: String) {
                         }
                         Rlog.w(TAG, "Got exception in accepted TCP server SIP flow; keeping IMS server socket alive", t)
                     } finally {
+                        dispatcher.removeWritersFor(accepted.writer)
                         serverSocket.closeAccepted(accepted.socket)
                     }
                 }
@@ -2401,13 +2841,10 @@ fun onWfcDisabled(reason: String) {
                 Rlog.d(TAG, "Unregistering stale IMS NetworkCallback failed", t)
             }
             Rlog.w(TAG, "Current IMS network was lost; dropping SIP state")
-            // Eagerly release IPsec SPIs and transforms while the ipsecX netdev
-            // is still alive to avoid a race with unregister_netdevice refcount=2
-            // → use-after-free in dst_destroy during ipsec1 teardown.
-            closeIpsecResources("IMS network lost (eager pre-cleanup)")
             val outgoingSetupFailure = outgoingCallSetupFailureForImsNetworkLoss()
             Rlog.w(TAG, "Invalidating IMS reconnect generation: current IMS network lost")
             reconnectController.invalidatePendingReconnects("IMS network state changed")
+            closeIpsecResources("IMS network lost (eager pre-cleanup)")
             dropImsConnection("IMS network lost")
             outgoingSetupFailure?.let { extras ->
                 Rlog.w(
@@ -2701,6 +3138,11 @@ fun onWfcDisabled(reason: String) {
     fun getVolteNetwork() {
         // TODO add something similar for VoWifi ipsec tunnel?
         Rlog.d(TAG, "Requesting IMS network ${imsDualSimDebugContext()}")
+        if (!carrierSettings.imsEnabled()) {
+            Rlog.w(TAG, "Carrier database disables IMS; not requesting an IMS bearer")
+            imsFailureCallback?.invoke()
+            return
+        }
         if (!isRatReadyForImsNetworkRequest()) {
             Rlog.w(TAG, "Deferring IMS network request until LTE/NR/IWLAN is back")
             scheduleImsNetworkRequestRestart("RAT not ready for IMS network request", 3_000L)
@@ -2726,10 +3168,25 @@ fun onWfcDisabled(reason: String) {
             serverPort = serverSocket.localPort,
             imei = imei,
             imsi = imsi,
+            voiceEnabled = effectiveVoiceEnabled(),
+            smsIpEnabled = effectiveSmsIpEnabled(),
+            expiresSeconds = carrierSettings.registrationExpiresSeconds,
         )
         contact = update.contact
         registerHeaders += update.headers
         commonHeaders += update.headers
+    }
+
+    private fun updateRegistrationContact(socket: SipConnection) {
+        contact = SipCommonHeaderBuilder.build(
+            socket = socket,
+            serverPort = serverSocket.localPort,
+            imei = imei,
+            imsi = imsi,
+            voiceEnabled = effectiveVoiceEnabled(),
+            smsIpEnabled = effectiveSmsIpEnabled(),
+            expiresSeconds = carrierSettings.registrationExpiresSeconds,
+        ).contact
     }
 
     fun register(_writer: OutputStream? = null) {
@@ -2742,7 +3199,7 @@ fun onWfcDisabled(reason: String) {
         // well that'd only matter if the server refused replays, so keep as is.
         // XXX timeout/retry? notification on fail? receive on thread?
 
-        val writer = _writer ?: socket.gWriter()
+        val writer = _writer ?: mainSipWriterForOutbound("REGISTER")
 
         val msg = SipRegisterRequestBuilder.build(
             realm = registerTargetRealm,
@@ -2759,9 +3216,12 @@ fun onWfcDisabled(reason: String) {
             stripSecurityVerifyQ = false,
             useSelectedSecurityClient = registerTargetRealm != realm,
             forceSecurityAgreementNullEalg = false,
+            supportGruu = carrierSettings.registerGruuSupported,
+            supportSecurityAgreement = carrierSettings.ipsecSupported,
+            registrationExpiresSeconds = carrierSettings.registrationExpiresSeconds,
         )
         val registerBytesWithNetworkHeaders = addCarrierRegisterNetworkHeaders(msg.toByteArray())
-        Rlog.d(TAG, "Sending ${registerBytesWithNetworkHeaders.toString(Charsets.US_ASCII)}")
+        Rlog.d(TAG, "Sending ${msg.safeLogSummary()}")
         if (!writeSipBytesWithFlush(writer, "REGISTER", registerBytesWithNetworkHeaders)) {
             reconnectIms("REGISTER write failed")
             return
@@ -2770,11 +3230,66 @@ fun onWfcDisabled(reason: String) {
     }
 
     fun registerCallback(response: SipResponse): Boolean {
-        // once we get there all register must be successful
-        // on failure just abort thread, ims will restart
-        require(response.statusCode == 200)
+        when (
+            SipRegisterRefreshResponsePolicy.action(
+                statusCode = response.statusCode,
+                sentOnRecoveredFlow =
+                    mainSipFlowRecoveredSinceRegistration.get(),
+            )
+        ) {
+            RegisterRefreshResponseAction.RECONNECT -> {
+                registerRefreshRetryAttempted.set(false)
+                registerRefreshRetryGeneration.incrementAndGet()
+                releaseRegisterRefreshRetryWakeLock(
+                    "recovered flow refresh rejected",
+                )
+                val failure = IOException(
+                    "REGISTER on recovered protected flow rejected: " +
+                        "${response.statusCode} ${response.statusString}",
+                )
+                Rlog.w(
+                    TAG,
+                    "Recovered protected main SIP flow cannot refresh the " +
+                        "registration; reconnecting IMS without retrying the " +
+                        "same security association",
+                )
+                myHandler.post { recoverAfterPeriodicRegisterFailure(failure) }
+                return false
+            }
+
+            RegisterRefreshResponseAction.KEEP_REGISTRATION -> {
+                // This callback handles REGISTER refreshes after the initial
+                // registration completed. A carrier may reject a service-tag
+                // update while the existing registration is still valid. Do
+                // not throw from the dispatcher and kill the SIP reader.
+                Rlog.w(
+                    TAG,
+                    "Keeping established IMS registration after REGISTER " +
+                        "refresh failed: ${response.statusCode} " +
+                        response.statusString,
+                )
+                scheduleRegisterRefreshRetry(response)
+                return false
+            }
+
+            RegisterRefreshResponseAction.APPLY_SUCCESS -> Unit
+        }
+
+        registerRefreshRetryAttempted.set(false)
+        registerRefreshRetryGeneration.incrementAndGet()
+        releaseRegisterRefreshRetryWakeLock("REGISTER refresh succeeded")
+        mainSipFlowRecoveredSinceRegistration.set(false)
 
         val registeredIdentity = SipRegisterSuccessParser.parse(response)
+        if (registeredIdentity == null) {
+            Rlog.w(
+                TAG,
+                "REGISTER 200 OK has no usable P-Associated-URI; " +
+                    "retrying IMS registration",
+            )
+            failConnectAndRetry("REGISTER 200 missing usable P-Associated-URI")
+            return true
+        }
         mySip = registeredIdentity.mySip
         myTel = registeredIdentity.myTel
         commonHeaders += registeredIdentity.commonHeaders()
@@ -2795,6 +3310,123 @@ fun onWfcDisabled(reason: String) {
         return false
     }
 
+    private fun scheduleRegisterRefreshRetry(response: SipResponse) {
+        if (!registerRefreshRetryAttempted.compareAndSet(false, true)) {
+            registerRefreshRetryGeneration.incrementAndGet()
+            releaseRegisterRefreshRetryWakeLock("REGISTER retry rejected")
+            val failure = IOException(
+                "REGISTER refresh retry rejected: " +
+                    "${response.statusCode} ${response.statusString}",
+            )
+            Rlog.w(TAG, "REGISTER refresh retry exhausted; reconnecting IMS")
+            myHandler.post { recoverAfterPeriodicRegisterFailure(failure) }
+            return
+        }
+
+        val retryDelayMs =
+            SipRegisterRefreshResponsePolicy.retryDelayMs(response)
+        val retryGeneration = registerRefreshRetryGeneration.incrementAndGet()
+        val wakeLockTimeoutMs =
+            retryDelayMs +
+                REGISTER_REFRESH_RETRY_RESPONSE_TIMEOUT_MS +
+                REGISTER_REFRESH_RETRY_WAKE_LOCK_GRACE_MS
+        try {
+            registerRefreshRetryWakeLock.acquire(wakeLockTimeoutMs)
+        } catch (t: Throwable) {
+            registerRefreshRetryAttempted.set(false)
+            registerRefreshRetryGeneration.incrementAndGet()
+            val failure = IOException(
+                "Could not hold CPU awake for REGISTER refresh retry",
+                t,
+            )
+            Rlog.w(
+                TAG,
+                "REGISTER refresh retry cannot be made Doze-safe; " +
+                    "reconnecting IMS",
+                t,
+            )
+            myHandler.post { recoverAfterPeriodicRegisterFailure(failure) }
+            return
+        }
+        Rlog.w(
+            TAG,
+            "Scheduling one REGISTER refresh retry after ${retryDelayMs}ms " +
+                "without dropping the established registration; " +
+                "wakeLockTimeoutMs=$wakeLockTimeoutMs",
+        )
+        myHandler.postDelayed(
+            {
+                if (
+                    retryGeneration != registerRefreshRetryGeneration.get() ||
+                    !imsReady
+                ) {
+                    Rlog.d(
+                        TAG,
+                        "Skipping stale REGISTER refresh retry " +
+                            "generation=$retryGeneration",
+                    )
+                    if (retryGeneration == registerRefreshRetryGeneration.get()) {
+                        registerRefreshRetryAttempted.set(false)
+                        registerRefreshRetryGeneration.incrementAndGet()
+                        releaseRegisterRefreshRetryWakeLock(
+                            "REGISTER retry became stale",
+                        )
+                    }
+                    return@postDelayed
+                }
+
+                try {
+                    Rlog.w(TAG, "Retrying failed REGISTER refresh")
+                    register()
+                } catch (t: Throwable) {
+                    registerRefreshRetryAttempted.set(false)
+                    registerRefreshRetryGeneration.incrementAndGet()
+                    releaseRegisterRefreshRetryWakeLock(
+                        "REGISTER retry threw",
+                    )
+                    recoverAfterPeriodicRegisterFailure(t)
+                }
+            },
+            retryDelayMs,
+        )
+        myHandler.postDelayed(
+            {
+                if (
+                    retryGeneration != registerRefreshRetryGeneration.get() ||
+                    !registerRefreshRetryAttempted.get()
+                ) {
+                    return@postDelayed
+                }
+
+                registerRefreshRetryGeneration.incrementAndGet()
+                releaseRegisterRefreshRetryWakeLock(
+                    "REGISTER retry response timeout",
+                )
+                val failure = IOException(
+                    "REGISTER refresh retry received no response within " +
+                        "${REGISTER_REFRESH_RETRY_RESPONSE_TIMEOUT_MS}ms",
+                )
+                Rlog.w(
+                    TAG,
+                    "REGISTER refresh retry timed out; reconnecting IMS",
+                )
+                recoverAfterPeriodicRegisterFailure(failure)
+            },
+            retryDelayMs + REGISTER_REFRESH_RETRY_RESPONSE_TIMEOUT_MS,
+        )
+    }
+
+    private fun releaseRegisterRefreshRetryWakeLock(reason: String) {
+        if (!registerRefreshRetryWakeLock.isHeld) return
+
+        try {
+            registerRefreshRetryWakeLock.release()
+            Rlog.d(TAG, "Released REGISTER refresh retry wake lock: $reason")
+        } catch (t: RuntimeException) {
+            Rlog.w(TAG, "Failed to release REGISTER refresh retry wake lock", t)
+        }
+    }
+
     fun subscribe() {
         val msg = SipRegEventSubscribeBuilder.build(
             mySip = mySip,
@@ -2803,10 +3435,15 @@ fun onWfcDisabled(reason: String) {
             socket = socket,
             serverPort = serverSocket.localPort,
             imei = imei,
+            supportSecurityAgreement = carrierSettings.ipsecSupported,
         )
         setResponseCallback(msg.headers["call-id"]!![0], ::subscribeCallback)
-        Rlog.d(TAG, "Sending $msg")
-        writeSipBytesWithFlush(socket.gWriter(), "SipHandler msg", msg.toByteArray())
+        Rlog.d(TAG, "Sending ${msg.safeLogSummary()}")
+        writeSipBytesWithFlush(
+            mainSipWriterForOutbound("reg-event SUBSCRIBE"),
+            "SipHandler msg",
+            msg.toByteArray(),
+        )
     }
 
     fun subscribeCallback(response: SipResponse): Boolean {
@@ -3178,6 +3815,7 @@ fun onWfcDisabled(reason: String) {
         )
         heldForegroundCall = null
         if (closeRtpSocket) {
+            dispatcher.removeWriterForCallId(heldCallId)
             sessionRefresher.cancel(heldCallId, reason)
             try { held.rtpSocket.close() } catch (t: Throwable) {
                 Rlog.d(TAG, "Failed to close held foreground RTP socket: callId=$heldCallId", t)
@@ -3293,6 +3931,7 @@ fun onWfcDisabled(reason: String) {
 
         val remoteMethodReason = SipRemoteDialogTermination.remoteMethodReason(request.method)
         sessionRefresher.cancel(callId, remoteMethodReason)
+        dispatcher.removeWriterForCallId(callId)
         if (currentCall?.outgoing == false) rememberTerminatedIncomingCall(callId, remoteMethodReason)
         val terminatedCall = currentCall
         val heldToResume = heldForegroundCall?.takeIf { terminatedCall != null && isBye }
@@ -3420,6 +4059,7 @@ fun onWfcDisabled(reason: String) {
         val responseWriter: OutputStream,
         val ringingResponseBytes: ByteArray,
         val callerNumber: String,
+        val callerPresentationRestricted: Boolean,
         val remoteContact: String,
         val incomingOffer: IncomingInviteOffer?,
         val setupState: IncomingInviteDialogSetupState?,
@@ -3821,11 +4461,10 @@ fun onWfcDisabled(reason: String) {
         val key = "${callId.ifBlank { "<blank>" }}|$reason"
         if (!outgoingConnectedDuplicateLogKeys.add(key)) return
 
-        if (callId.isBlank()) {
-            logDuplicateOutgoingConnectedOnce("", reason)
-        } else {
-            logDuplicateOutgoingConnectedOnce(callId, reason)
-        }
+        Rlog.d(
+            TAG,
+            SipOutgoingCallConnectionLogs.duplicateConnectedNotifyLog(callId, reason),
+        )
     }
 
     private fun maybeNotifyOutgoingCallConnected(call: Call, reason: String) {
@@ -3933,6 +4572,8 @@ fun onWfcDisabled(reason: String) {
         response: SipResponse,
         acceptedCallId: String,
     ): IncomingInviteFinalResponseWrite? {
+        callSetupTimers.cancelAll("incoming INVITE accepted")
+        callSignalingKeepAlive.stop("incoming INVITE accepted")
         val responseWriter = call.incomingResponseWriter ?: socket.gWriter()
         val responseBytes = response.toByteArray()
         Rlog.d(
@@ -4146,53 +4787,71 @@ fun onWfcDisabled(reason: String) {
         )
     }
 
-    fun acceptCall(callId: String? = null) {
+    fun acceptCall(
+        callId: String? = null,
+        onFinalResponseSent: (Boolean) -> Unit = {},
+    ) {
         thread {
-            val waiting = pendingWaitingInvite
-            if (waiting != null && callId == waiting.callId) {
-                acceptPendingWaitingInvite(waiting)
-                return@thread
+            val accepted = try {
+                val waiting = pendingWaitingInvite
+                if (waiting != null && callId == waiting.callId) {
+                    acceptPendingWaitingInvite(waiting)
+                } else {
+                    acceptCurrentIncomingCall(callId)
+                }
+            } catch (t: Throwable) {
+                Rlog.e(TAG, "Accepting incoming call failed: callId=$callId", t)
+                false
             }
 
-            val acceptTarget = acceptedIncomingCallAfterAccessGuard(callId) ?: return@thread
-            var call = acceptTarget.call
-            val acceptedCallId = acceptTarget.acceptedCallId
-
-            // S9/O2 test mode: never block accept on pending incoming PRACK state.
-            // The network currently does not PRACK our reliable incoming 183, so
-            // waiting here makes the remote side ring until timeout.
-            prAckWaitTracker.dropStaleBeforeAccept(TAG)
-
-            Rlog.d(TAG, "Accepting call")
-            val finalSdp = prepareAcceptedIncomingInviteFinalSdp(
-                call = call,
-                acceptedCallId = acceptedCallId,
-            )
-            call = finalSdp.call
-            val omitFinalSdp = finalSdp.omitFinalSdp
-
-            val msg3 = okAcceptedIncomingInviteFinalResponse(
-                call = call,
-                omitFinalSdp = omitFinalSdp,
-            )
-            val finalResponseWrite = sendAcceptedIncomingInviteFinalResponse(
-                call = call,
-                response = msg3,
-                acceptedCallId = acceptedCallId,
-            ) ?: return@thread
-            val responseWriter = finalResponseWrite.responseWriter
-            val responseBytes = finalResponseWrite.responseBytes
-            prewarmIncomingMediaAfterAccept(call)
-
-            startIncomingInviteFinalResponseRetransmit(
-                acceptedCallId = acceptedCallId,
-                responseWriter = responseWriter,
-                responseBytes = responseBytes,
-            )
-
-            // Do not mark SIP confirmed here. For incoming calls, the dialog is only confirmed
-            // when the remote side ACKs our 200 OK. handleAck() will set callStarted.
+            try {
+                onFinalResponseSent(accepted)
+            } catch (t: Throwable) {
+                Rlog.e(TAG, "Incoming accept completion callback failed: callId=$callId", t)
+            }
         }
+    }
+
+    private fun acceptCurrentIncomingCall(callId: String?): Boolean {
+        val acceptTarget = acceptedIncomingCallAfterAccessGuard(callId) ?: return false
+        var call = acceptTarget.call
+        val acceptedCallId = acceptTarget.acceptedCallId
+
+        // S9/O2 test mode: never block accept on pending incoming PRACK state.
+        // The network currently does not PRACK our reliable incoming 183, so
+        // waiting here makes the remote side ring until timeout.
+        prAckWaitTracker.dropStaleBeforeAccept(TAG)
+
+        Rlog.d(TAG, "Accepting call")
+        val finalSdp = prepareAcceptedIncomingInviteFinalSdp(
+            call = call,
+            acceptedCallId = acceptedCallId,
+        )
+        call = finalSdp.call
+        val omitFinalSdp = finalSdp.omitFinalSdp
+
+        val msg3 = okAcceptedIncomingInviteFinalResponse(
+            call = call,
+            omitFinalSdp = omitFinalSdp,
+        )
+        val finalResponseWrite = sendAcceptedIncomingInviteFinalResponse(
+            call = call,
+            response = msg3,
+            acceptedCallId = acceptedCallId,
+        ) ?: return false
+        val responseWriter = finalResponseWrite.responseWriter
+        val responseBytes = finalResponseWrite.responseBytes
+        prewarmIncomingMediaAfterAccept(call)
+
+        startIncomingInviteFinalResponseRetransmit(
+            acceptedCallId = acceptedCallId,
+            responseWriter = responseWriter,
+            responseBytes = responseBytes,
+        )
+
+        // Do not mark SIP confirmed here. For incoming calls, the dialog is only confirmed
+        // when the remote side ACKs our 200 OK. handleAck() will set callStarted.
+        return true
     }
 
     fun prack(resp: SipResponse, cseq: Int) {
@@ -4203,8 +4862,17 @@ fun onWfcDisabled(reason: String) {
         // PRACK is a request within the early dialog; route set comes from Record-Route
         // in the provisional response (RFC 3262 §4, RFC 3261 §12.1.2), not from the
         // registration Service-Route stored in commonHeaders.
-        val dialogRoute = resp.headers["record-route"]
-        val headers = if (dialogRoute != null) commonHeaders + ("route" to dialogRoute) else commonHeaders
+        val dialogRoute = outgoingDialogRouteSet(resp.headers)
+        val headers = if (dialogRoute.isNotEmpty()) {
+            commonHeaders + ("route" to dialogRoute)
+        } else {
+            commonHeaders - "route"
+        }
+        val securityAgreementHeader = if (carrierSettings.ipsecSupported) {
+            "Require: sec-agree"
+        } else {
+            ""
+        }
         val msg =
             SipRequest(
                 SipMethod.PRACK,
@@ -4212,13 +4880,13 @@ fun onWfcDisabled(reason: String) {
                 headersParam = headers + """
                     RAck: $whatToPrack
                     CSeq: $cseq PRACK
-                    Require: sec-agree
+                    $securityAgreementHeader
                     To: ${resp.headers["to"]!![0]}
                     From: ${resp.headers["from"]!![0]}
                     Call-Id: $callId
                     """.toSipHeadersMap()
             )
-        Rlog.d(TAG, "Sending $msg")
+        Rlog.d(TAG, "Sending ${msg.safeLogSummary()}")
         if (!writeSipBytesWithFlush(
                 socket.gWriter(),
                 "outgoing PRACK callId=$callId",
@@ -4372,8 +5040,34 @@ fun onWfcDisabled(reason: String) {
             byeHeaders = byeHeaders,
         )
         Rlog.d(TAG, SipRemoteDialogTermination.byeLog(bye))
+        val registeredDialogWriter =
+            callId?.let { dispatcher.writerForCallId(it) }
+        val byeWriter = try {
+            SipRemoteDialogTermination.localDialogRequestWriter(
+                incomingResponseWriter = call.incomingResponseWriter,
+                registeredDialogWriter = registeredDialogWriter,
+                fallbackWriter = {
+                    mainSipWriterForOutbound("local BYE")
+                },
+            )
+        } catch (t: Throwable) {
+            recoverAfterLocalTerminateWriteFailure(
+                requestName = "BYE",
+                callId = callId,
+                reason = "local call termination writer unavailable",
+                error = t,
+            )
+            return
+        }
+        Rlog.d(
+            TAG,
+            "Routing local BYE on dialog flow: " +
+                "callId=$callId " +
+                "incomingWriter=${call.incomingResponseWriter != null} " +
+                "registeredWriter=${registeredDialogWriter != null}",
+        )
         if (!writeSipBytesWithFlush(
-                socket.gWriter(),
+                byeWriter,
                 SipRemoteDialogTermination.byeWriteLabel(),
                 bye.toByteArray(),
             )
@@ -4655,6 +5349,48 @@ fun onWfcDisabled(reason: String) {
         }
     }
 
+    private fun handleOutgoingCallSetupTimeout(callId: String, reason: String) {
+        val pending = pendingOutgoingInvite
+        if (pending == null || pending.callId != callId || callStarted.get()) {
+            Rlog.d(TAG, "Ignoring stale outgoing timer: callId=$callId reason=$reason")
+            return
+        }
+
+        Rlog.w(TAG, "Outgoing call setup timer expired: callId=$callId reason=$reason")
+        stopCallRuntime(reason)
+        if (currentCall?.callIdOrNull() == callId) {
+            currentCall = null
+        }
+        sendCancelForPendingOutgoingInvite(pending, reason)
+        onCancelledCall?.invoke(
+            Object(),
+            reason,
+            mapOf(
+                "call-id" to callId,
+                "statusCode" to "408",
+                "statusString" to "Request Timeout",
+                "callStartFailed" to "true",
+            ),
+        )
+    }
+
+    private fun handleIncomingRingingTimeout(callId: String) {
+        val waiting = pendingWaitingInvite
+        if (waiting?.callId == callId) {
+            Rlog.w(TAG, "Incoming call-waiting ringing timer expired: callId=$callId")
+            rejectPendingWaitingInvite(waiting, "incoming ringing timeout")
+            return
+        }
+
+        val call = currentCall
+        if (call == null || call.outgoing || call.callIdOrNull() != callId || callStarted.get()) {
+            Rlog.d(TAG, "Ignoring stale incoming ringing timer: callId=$callId")
+            return
+        }
+        Rlog.w(TAG, "Incoming ringing timer expired: callId=$callId")
+        rejectCall(callId)
+    }
+
     private fun createOutgoingCallRtpSocket(): DatagramSocket? {
         val rtpSocket = try {
             DatagramSocket(0, localAddr)
@@ -4699,8 +5435,11 @@ fun onWfcDisabled(reason: String) {
             rtpSocket = rtpSocket,
             localHost = "${socket.gLocalAddr().hostAddress}",
             ipType = if (localAddr is Inet6Address) "IP6" else "IP4",
-            amrWbMediaCodecAvailable = amrWbMediaCodecAvailable,
+            amrWbMediaCodecAvailable = carrierAmrWbMediaCodecAvailable,
             singtelStockOutgoingCarrier = useSingTelStockOutgoingPolicy(),
+            preconditionEnabled = carrierSettings.preconditionEnabled(
+                imsRegistrationTech,
+            ),
         )
     }
 
@@ -4736,8 +5475,21 @@ fun onWfcDisabled(reason: String) {
             sessionExpiresSeconds = outgoingInviteSessionTimer.sessionExpiresSeconds,
             minSeSeconds = outgoingInviteSessionTimer.minSeSeconds,
             generatedCallIdHeaders = generateCallId(),
+            accessNetworkHeaders = SipAccessNetworkHeaders.forOutgoingInvite(
+                logTag = TAG,
+                telephonyManager = subTelephonyManager,
+                registrationTech = imsRegistrationTech,
+                policy = carrierSettings.policy.outgoingPaniPolicy,
+                visitedNetworkPolicy =
+                    carrierSettings.policy.outgoingVisitedNetworkPolicy,
+                visitedNetworkId = realm,
+            ),
             singtelStockOutgoingCarrier = useSingTelStockOutgoingPolicy(),
             singtelPublicSipUri = { number -> carrierSettings.singtelPublicSipUri(number) },
+            preconditionEnabled = carrierSettings.preconditionEnabled(
+                imsRegistrationTech,
+            ),
+            supportSecurityAgreement = carrierSettings.ipsecSupported,
         )
     }
 
@@ -4823,13 +5575,19 @@ fun onWfcDisabled(reason: String) {
     ) {
         // Update dialog route set from the confirmed 200 OK (RFC 3261 §12.1.2)
         // so that subsequent in-dialog requests (BYE, UPDATE) use the correct route.
-        val rrFrom200Ok = response.headers["record-route"]
+        val rrFrom200Ok = recordRouteValues(response.headers)
+        val routeSetFrom200Ok = outgoingDialogRouteSet(response.headers)
         val remoteTargetFrom200Ok = response.headers["contact"]?.getOrNull(0)
             ?.let { extractDestinationFromContact(it) }
         currentCall = currentCall?.let { confirmedCall ->
             var confirmedHeaders = confirmedCall.callHeaders
-            if (rrFrom200Ok != null) {
-                confirmedHeaders = confirmedHeaders + ("record-route" to rrFrom200Ok) + ("route" to rrFrom200Ok)
+            if (rrFrom200Ok.isNotEmpty()) {
+                confirmedHeaders = confirmedHeaders +
+                    ("record-route" to rrFrom200Ok) +
+                    ("route" to routeSetFrom200Ok)
+            } else {
+                confirmedHeaders -= "record-route"
+                confirmedHeaders -= "route"
             }
             // INVITE uses its original CSeq for ACK. Keep later in-dialog requests
             // past any PRACK/UPDATE/BYE CSeq already allocated while the call was pending.
@@ -4992,6 +5750,24 @@ fun onWfcDisabled(reason: String) {
         cseq: String,
         outgoingDialogNextCseq: AtomicInteger,
     ): Boolean? {
+        if (cseq.contains("INVITE", ignoreCase = true)) {
+            callSetupTimers.onOutgoingInviteResponse(
+                response.callIdOrEmpty(),
+                response.statusCode,
+            )
+            if (response.statusCode >= 200) {
+                callSignalingKeepAlive.stop(
+                    "outgoing INVITE final response ${response.statusCode}",
+                )
+            } else if (
+                carrierSettings.callSignalingKeepAlivePolicy
+                    .startsForOutgoing(response.statusCode)
+            ) {
+                callSignalingKeepAlive.start(
+                    "outgoing INVITE response ${response.statusCode}",
+                )
+            }
+        }
         if (cseq.contains("INVITE") && (response.statusCode == 200 || response.statusCode == 202)) {
             return null
         }
@@ -5015,6 +5791,11 @@ fun onWfcDisabled(reason: String) {
             val failedCseq = response.headers["cseq"]?.getOrNull(0).orEmpty()
             val activeCallId = currentCall?.callIdOrNull()
             val pendingCallId = pendingOutgoingInvite?.callId
+            val initialInviteFailed =
+                failedPendingInvite != null &&
+                    failedPendingInvite.callId == failedCallId &&
+                    failedCseq.contains("INVITE", ignoreCase = true) &&
+                    !callStarted.get()
 
             if (activeCallId != failedCallId && pendingCallId != failedCallId) {
                 Rlog.w(
@@ -5078,12 +5859,27 @@ fun onWfcDisabled(reason: String) {
                     statusCode = response.statusCode,
                 ),
             )
+            val csRetry =
+                initialInviteFailed &&
+                    carrierSettings.inviteFailurePolicy.shouldFallbackToCs(
+                        response.statusCode,
+                    )
+            if (csRetry) {
+                Rlog.w(
+                    TAG,
+                    "Carrier database requests CSFB after outgoing INVITE failure " +
+                        "${response.statusCode} for ${carrierSettings.mccMnc}",
+                )
+            }
             onCancelledCall?.invoke(
                 Object(),
                 "",
                 SipOutgoingInviteProgressResponses.outgoingDialogFailureCancellationExtras(
                     response = response,
                     failedCseq = failedCseq,
+                ) + SipOutgoingInviteProgressResponses.outgoingFailureRoutingExtras(
+                    initialInviteFailed = initialInviteFailed,
+                    csRetry = csRetry,
                 ),
             )
             // The whole call failed, so drop that call-id
@@ -5091,6 +5887,52 @@ fun onWfcDisabled(reason: String) {
         }
 
         return null
+    }
+
+    private fun handleAlternativeServiceResponseIfNeeded(
+        response: SipResponse,
+        cseq: String,
+    ): Boolean? {
+        if (!cseq.contains("INVITE", ignoreCase = true)) return null
+        val alternative = SipAlternativeServiceParser.parse(response) ?: return null
+        val callId = response.callIdOrEmpty()
+        val pending = pendingOutgoingInvite
+        if (pending == null || pending.callId != callId || callStarted.get()) {
+            Rlog.w(TAG, "Ignoring stale Alternative-Service response: callId=$callId")
+            return true
+        }
+
+        Rlog.w(
+            TAG,
+            "Alternative-Service: action=${alternative.action} " +
+                "urn=${alternative.serviceUrn} reason=${alternative.reason}",
+        )
+        callSetupTimers.cancelAll("Alternative-Service ${response.statusCode}")
+        stopCallRuntime("Alternative-Service ${alternative.action}")
+        if (currentCall?.callIdOrNull() == callId) {
+            currentCall = null
+        }
+        clearPendingOutgoingInvite(
+            callId,
+            closeRtpSocket = true,
+            reason = "Alternative-Service ${alternative.action}",
+        )
+        val extras = mutableMapOf(
+            "call-id" to callId,
+            "statusCode" to response.statusCode.toString(),
+            "statusString" to alternative.reason.ifBlank { "Alternative Service" },
+            "callStartFailed" to "true",
+            "outgoingCall" to "true",
+            "alternativeServiceAction" to alternative.action.name,
+            "alternativeServiceUrn" to alternative.serviceUrn,
+        )
+        if (alternative.requiresImsRetry) {
+            extras["imsRetry"] = "true"
+        } else {
+            extras["csRetry"] = "true"
+        }
+        onCancelledCall?.invoke(Object(), "Alternative-Service", extras)
+        return true
     }
 
 
@@ -5156,7 +5998,7 @@ fun onWfcDisabled(reason: String) {
             rtpSocket = rtpSocket,
             amrNbTrack = amrNbTrack,
             dtmfNbTrack = dtmfNbTrack,
-            amrWbMediaCodecAvailable = amrWbMediaCodecAvailable,
+            amrWbMediaCodecAvailable = carrierAmrWbMediaCodecAvailable,
         )
 
 
@@ -5176,11 +6018,20 @@ fun onWfcDisabled(reason: String) {
             dtmfTrackDesc = answer.dialogDtmfTrackDesc,
             // Update from/to/call-id based on the response we got to include the remote tag.
             // Keep the response Record-Route too; later local BYE/UPDATE must use it as Route.
-            callHeaders = myHeaders - "require" - "content-type" +
+            callHeaders = myHeaders - "require" - "content-type" - "route" - "record-route" +
                 ("from" to response.headers["from"]!!) +
                 ("to" to response.headers["to"]!!) +
                 ("call-id" to response.headers["call-id"]!!) +
-                (response.headers["record-route"]?.let { mapOf("record-route" to it, "route" to it) } ?: emptyMap()),
+                recordRouteValues(response.headers).let { recordRoute ->
+                    if (recordRoute.isEmpty()) {
+                        emptyMap()
+                    } else {
+                        mapOf(
+                            "record-route" to recordRoute,
+                            "route" to outgoingDialogRouteSet(response.headers),
+                        )
+                    }
+                },
             rtpRemoteAddr = answer.rtpRemoteAddr,
             rtpRemotePort = answer.rtpRemotePortInt,
             rtpSocket = rtpSocket,
@@ -5531,6 +6382,8 @@ fun onWfcDisabled(reason: String) {
 
         handleOutgoingAckOrByeResponse(resp, cseq)?.let { return it }
 
+        handleAlternativeServiceResponseIfNeeded(resp, cseq)?.let { return it }
+
         handleOutgoingFinalInviteAckIfNeeded(
             response = resp,
             myHeaders = myHeaders,
@@ -5627,7 +6480,12 @@ fun onWfcDisabled(reason: String) {
                 body = body,
                 debugContext = { context -> imsDualSimDebugContext(context) },
                 writeBytes = { bytes ->
-                    if (!writeSipBytesWithFlush(socket.gWriter(), "initial outgoing INVITE", bytes)) {
+                    if (!writeSipBytesWithFlush(
+                            mainSipWriterForOutbound("initial outgoing INVITE"),
+                            "initial outgoing INVITE",
+                            bytes,
+                        )
+                    ) {
                         throw IOException("initial outgoing INVITE write failed")
                     }
                 },
@@ -5677,6 +6535,7 @@ fun onWfcDisabled(reason: String) {
             outgoingInviteBody = outgoingInviteBody,
         )
         val msg = outgoingInviteRequestContext.request
+        Rlog.i(TAG, "Outgoing INVITE shape: ${SipCarrierDiagnostics.requestShape(msg)}")
         val singtelStockOutgoingTargetUri = outgoingInviteRequestContext.targetUri
         val normalizedPhoneNumber = outgoingInviteRequestContext.normalizedPhoneNumber
 
@@ -5712,8 +6571,23 @@ fun onWfcDisabled(reason: String) {
             outgoingCallSetupInProgress.set(true)
             clearPendingOutgoingInvite(closeRtpSocket = true, reason = "new outgoing call")
 
+            if (!effectiveVoiceEnabled()) {
+                failOutgoingCallSetup(
+                    statusString = "Carrier profile disables IMS voice on this access",
+                    logReason = "outgoing call blocked by effective carrier service policy",
+                )
+                return@thread
+            }
+
             var rtpSocket: DatagramSocket? = null
             try {
+                if (!ensureMainSipFlowForOutbound("outgoing call")) {
+                    failOutgoingCallSetup(
+                        statusString = "IMS signaling transport unavailable",
+                        logReason = "main SIP flow recovery failed before outgoing call",
+                    )
+                    return@thread
+                }
                 rtpSocket = createOutgoingCallRtpSocket() ?: return@thread
                 if (
                     sendInitialOutgoingInvite(
@@ -5845,51 +6719,74 @@ fun onWfcDisabled(reason: String) {
         Rlog.d(TAG, "Downlink RTP receive started: codec=${audioCodec.name}/${audioCodec.sampleRate} gen=$generation")
         val audioManager = ctxt.getSystemService(android.media.AudioManager::class.java)
         val prevDecodeAudioMode = audioManager.mode
-        if (prevDecodeAudioMode != AudioManager.MODE_IN_COMMUNICATION) {
-            Rlog.d(TAG, "Decode thread forcing MODE_IN_COMMUNICATION before AudioTrack: was=$prevDecodeAudioMode")
-            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+        var audioTrack: android.media.AudioTrack? = null
+        var decoder: android.media.MediaCodec? = null
+        var decoderWorker: SipDownlinkAudioDecoderWorker? = null
+        var downlinkPlayoutBuffers: SipDownlinkPcmPlayoutBuffers? = null
+        var downlinkPlayoutThread: Thread? = null
+
+        try {
+            // Create the codec before changing global audio state or starting
+            // playout. Codec construction is the most device-dependent step.
+            decoder = SipAudioCodecFactory.createStartedDecoder(
+                audioCodec = audioCodec,
+            )
+
+            if (prevDecodeAudioMode != AudioManager.MODE_IN_COMMUNICATION) {
+                Rlog.d(TAG, "Decode thread forcing MODE_IN_COMMUNICATION before AudioTrack: was=$prevDecodeAudioMode")
+                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            }
+            audioTrack = SipAudioTrackFactory.createVoiceCallTrack(
+                audioCodec = audioCodec,
+            )
+            audioTrack.play()
+            // PhhIms downlink PCM playout smoother: decouple RTP receive jitter
+            // from AudioTrack writes. IVR/transfer gateways can burst packets or
+            // send sparse SID/CN frames after DTMF; writing only when RTP arrives
+            // lets AudioTrack underrun and sounds like heavy stutter. Keep a tiny
+            // 20ms playout loop and feed silence when the decoder has no PCM ready.
+            downlinkPlayoutBuffers = SipDownlinkPcmPlayoutBuffers.create(audioCodec)
+            downlinkPlayoutThread = SipDownlinkPcmPlayout.start(
+                logTag = TAG,
+                audioTrack = audioTrack,
+                audioCodec = audioCodec,
+                buffers = downlinkPlayoutBuffers,
+                echoCancellation = echoCancellation,
+                callStopped = callStopped,
+                callGeneration = callGeneration,
+                generation = generation,
+            )
+
+            decoderWorker = SipDownlinkAudioDecoderWorker(
+                logTag = TAG,
+                decoder = decoder,
+                pcmQueue = downlinkPlayoutBuffers.pcmQueue,
+                callStopped = callStopped,
+                callGeneration = callGeneration,
+                generation = generation,
+            )
+
+            return DownlinkAudioRuntime(
+                audioTrack = audioTrack,
+                decoder = decoder,
+                decoderWorker = decoderWorker,
+                playoutBuffers = downlinkPlayoutBuffers,
+                playoutThread = downlinkPlayoutThread,
+                previousAudioMode = prevDecodeAudioMode,
+            )
+        } catch (t: Throwable) {
+            SipDownlinkAudioCleanup.cleanupStartupFailure(
+                logTag = TAG,
+                context = ctxt,
+                audioTrack = audioTrack,
+                decoder = decoder,
+                decoderWorker = decoderWorker,
+                playoutBuffers = downlinkPlayoutBuffers,
+                playoutThread = downlinkPlayoutThread,
+                previousAudioMode = prevDecodeAudioMode,
+            )
+            throw t
         }
-        val audioTrack = SipAudioTrackFactory.createVoiceCallTrack(
-            audioCodec = audioCodec,
-        )
-        audioTrack.play()
-        // PhhIms downlink PCM playout smoother: decouple RTP receive jitter
-        // from AudioTrack writes. IVR/transfer gateways can burst packets or
-        // send sparse SID/CN frames after DTMF; writing only when RTP arrives
-        // lets AudioTrack underrun and sounds like heavy stutter. Keep a tiny
-        // 20ms playout loop and feed silence when the decoder has no PCM ready.
-        val downlinkPlayoutBuffers = SipDownlinkPcmPlayoutBuffers.create(audioCodec)
-        val downlinkPlayoutThread = SipDownlinkPcmPlayout.start(
-            logTag = TAG,
-            audioTrack = audioTrack,
-            audioCodec = audioCodec,
-            buffers = downlinkPlayoutBuffers,
-            echoCancellation = echoCancellation,
-            callStopped = callStopped,
-            callGeneration = callGeneration,
-            generation = generation,
-        )
-
-        val decoder = SipAudioCodecFactory.createStartedDecoder(
-            audioCodec = audioCodec,
-        )
-        val decoderWorker = SipDownlinkAudioDecoderWorker(
-            logTag = TAG,
-            decoder = decoder,
-            pcmQueue = downlinkPlayoutBuffers.pcmQueue,
-            callStopped = callStopped,
-            callGeneration = callGeneration,
-            generation = generation,
-        )
-
-        return DownlinkAudioRuntime(
-            audioTrack = audioTrack,
-            decoder = decoder,
-            decoderWorker = decoderWorker,
-            playoutBuffers = downlinkPlayoutBuffers,
-            playoutThread = downlinkPlayoutThread,
-            previousAudioMode = prevDecodeAudioMode,
-        )
     }
 
 
@@ -5928,40 +6825,42 @@ fun onWfcDisabled(reason: String) {
         val gen = callGeneration.get()
         // Receiving thread
         thread {
-            val downlinkRuntime = createDownlinkAudioRuntime(
-                audioCodec = audioCodec,
-                generation = gen,
-            )
-            val audioTrack = downlinkRuntime.audioTrack
-            val decoder = downlinkRuntime.decoder
-            val decoderWorker = downlinkRuntime.decoderWorker
-            val downlinkPlayoutBuffers = downlinkRuntime.playoutBuffers
-            val downlinkPlayoutThread = downlinkRuntime.playoutThread
-            val prevDecodeAudioMode = downlinkRuntime.previousAudioMode
-
-            val receivedCount = runDownlinkRtpReceiveLoop(
-                audioCodec = audioCodec,
-                decoderWorker = decoderWorker,
-                generation = gen,
-            )
-            echoCancellation.stop(
-                generation = gen,
-                reason = "downlink receive ended",
-            )
-            SipDownlinkAudioCleanup.cleanup(
-                logTag = TAG,
-                context = ctxt,
-                audioTrack = audioTrack,
-                decoder = decoder,
-                decoderWorker = decoderWorker,
-                playoutBuffers = downlinkPlayoutBuffers,
-                playoutThread = downlinkPlayoutThread,
-                callStopped = callStopped,
-                callGeneration = callGeneration,
-                generation = gen,
-                receivedCount = receivedCount,
-                previousAudioMode = prevDecodeAudioMode,
-            )
+            var downlinkRuntime: DownlinkAudioRuntime? = null
+            var receivedCount = 0
+            try {
+                downlinkRuntime = createDownlinkAudioRuntime(
+                    audioCodec = audioCodec,
+                    generation = gen,
+                )
+                receivedCount = runDownlinkRtpReceiveLoop(
+                    audioCodec = audioCodec,
+                    decoderWorker = downlinkRuntime.decoderWorker,
+                    generation = gen,
+                )
+            } catch (t: Throwable) {
+                Rlog.e(TAG, "Downlink audio thread failed: gen=$gen", t)
+            } finally {
+                echoCancellation.stop(
+                    generation = gen,
+                    reason = "downlink receive ended",
+                )
+                downlinkRuntime?.let { runtime ->
+                    SipDownlinkAudioCleanup.cleanup(
+                        logTag = TAG,
+                        context = ctxt,
+                        audioTrack = runtime.audioTrack,
+                        decoder = runtime.decoder,
+                        decoderWorker = runtime.decoderWorker,
+                        playoutBuffers = runtime.playoutBuffers,
+                        playoutThread = runtime.playoutThread,
+                        callStopped = callStopped,
+                        callGeneration = callGeneration,
+                        generation = gen,
+                        receivedCount = receivedCount,
+                        previousAudioMode = runtime.previousAudioMode,
+                    )
+                }
+            }
         }
     }
 
@@ -6558,12 +7457,15 @@ fun onWfcDisabled(reason: String) {
         )
         val ringingResponse = SipIncomingInviteDialogSetup.plainRingingResponse(waitingHeaders)
         val ringingBytes = ringingResponse.toByteArray()
+        val waitingIdentity = SipIncomingIdentityResolver.resolve(request.headers)
         val callerNumber = waitingOffer?.callerNumber
-            ?: normalizeIncomingCallerNumberForFramework(
-                extractCallerNumberFromHeader(
-                    request.headers["from"]?.getOrNull(0).orEmpty(),
-                ).trim(),
-            )
+            ?: waitingIdentity.identityHeader
+                ?.let(::extractCallerNumberFromHeader)
+                ?.let(::normalizeIncomingCallerNumberForFramework)
+                .orEmpty()
+        val callerPresentationRestricted =
+            waitingOffer?.callerPresentationRestricted
+                ?: waitingIdentity.presentationRestricted
         val remoteContact = request.headers["contact"]?.getOrNull(0)
             ?.let { extractDestinationFromContact(it) }
             .orEmpty()
@@ -6575,6 +7477,7 @@ fun onWfcDisabled(reason: String) {
             responseWriter = incomingResponseWriter,
             ringingResponseBytes = ringingBytes,
             callerNumber = callerNumber,
+            callerPresentationRestricted = callerPresentationRestricted,
             remoteContact = remoteContact,
             incomingOffer = waitingOffer,
             setupState = waitingSetupState,
@@ -6586,11 +7489,19 @@ fun onWfcDisabled(reason: String) {
             "Exposing carrier call-waiting INVITE as pending incoming session: " +
                 callWaitingInfo.logSummary(),
         )
-        writeSipBytesWithFlush(
+        val waitingRingingSent = writeSipBytesWithFlush(
             incomingResponseWriter,
             "call-waiting 180 Ringing callId=$incomingCallId",
             ringingBytes,
         )
+        if (waitingRingingSent &&
+            carrierSettings.callSignalingKeepAlivePolicy.startsForIncoming
+        ) {
+            callSignalingKeepAlive.start("incoming call-waiting INVITE")
+        }
+        if (waitingRingingSent) {
+            callSetupTimers.startIncoming(incomingCallId)
+        }
         onIncomingCall?.invoke(
             Object(),
             callerNumber,
@@ -6598,6 +7509,7 @@ fun onWfcDisabled(reason: String) {
                 "call-id" to incomingCallId,
                 "call-waiting" to "true",
                 "call-waiting-media-prepared" to (waitingSetupState != null).toString(),
+                "presentation-restricted" to callerPresentationRestricted.toString(),
             ) + SipAudioCodecNegotiator.audioCodecExtras(waitingCodec),
         )
 
@@ -6728,7 +7640,7 @@ fun onWfcDisabled(reason: String) {
             ackDestination,
             ackHeaders,
         )
-        Rlog.d(TAG, "Sending ACK for $label: $ack")
+        Rlog.d(TAG, "Sending ACK for $label: ${ack.safeLogSummary()}")
         return writeSipBytesWithFlush(socket.gWriter(), "$label ACK", ack.toByteArray())
     }
 
@@ -6753,12 +7665,8 @@ fun onWfcDisabled(reason: String) {
             holdSdp,
         )
 
-        setResponseCallback(callId) { response ->
+        setResponseCallback(callId, inviteCseq, SipMethod.INVITE) { response ->
             val cseq = response.headers["cseq"]?.getOrNull(0).orEmpty()
-            if (!cseq.contains("INVITE", ignoreCase = true)) {
-                Rlog.d(TAG, "Ignoring non-INVITE response while waiting for hold re-INVITE: callId=$callId cseq=$cseq status=${response.statusCode}")
-                return@setResponseCallback false
-            }
             when (response.statusCode) {
                 in 100..199 -> {
                     Rlog.d(TAG, "Call-waiting hold re-INVITE provisional: callId=$callId status=${response.statusCode} cseq=$cseq")
@@ -6811,7 +7719,7 @@ fun onWfcDisabled(reason: String) {
                 holdInvite.toByteArray(),
             )
         ) {
-            removeResponseCallback(callId)
+            removeResponseCallback(callId, inviteCseq, SipMethod.INVITE)
             reconnectIms("call-waiting hold re-INVITE write failed")
             return false
         }
@@ -6980,16 +7888,8 @@ fun onWfcDisabled(reason: String) {
             resumeSdp,
         )
 
-        setResponseCallback(callId) { response ->
+        setResponseCallback(callId, inviteCseq, SipMethod.INVITE) { response ->
             val cseq = response.headers["cseq"]?.getOrNull(0).orEmpty()
-            if (!cseq.contains("INVITE", ignoreCase = true)) {
-                Rlog.d(
-                    TAG,
-                    "Ignoring non-INVITE response while waiting for current foreground resume re-INVITE: " +
-                        "callId=$callId cseq=$cseq status=${response.statusCode}",
-                )
-                return@setResponseCallback false
-            }
             when (response.statusCode) {
                 in 100..199 -> {
                     Rlog.d(
@@ -7059,7 +7959,7 @@ fun onWfcDisabled(reason: String) {
                 resumeInvite.toByteArray(),
             )
         ) {
-            removeResponseCallback(callId)
+            removeResponseCallback(callId, inviteCseq, SipMethod.INVITE)
             reconnectIms("current foreground resume re-INVITE write failed")
             return false
         }
@@ -7087,16 +7987,8 @@ fun onWfcDisabled(reason: String) {
             resumeSdp,
         )
 
-        setResponseCallback(callId) { response ->
+        setResponseCallback(callId, inviteCseq, SipMethod.INVITE) { response ->
             val cseq = response.headers["cseq"]?.getOrNull(0).orEmpty()
-            if (!cseq.contains("INVITE", ignoreCase = true)) {
-                Rlog.d(
-                    TAG,
-                    "Ignoring non-INVITE response while waiting for resume re-INVITE: " +
-                        "callId=$callId cseq=$cseq status=${response.statusCode}",
-                )
-                return@setResponseCallback false
-            }
             when (response.statusCode) {
                 in 100..199 -> {
                     Rlog.d(TAG, "Call-waiting resume re-INVITE provisional: callId=$callId status=${response.statusCode} cseq=$cseq")
@@ -7159,7 +8051,7 @@ fun onWfcDisabled(reason: String) {
                 resumeInvite.toByteArray(),
             )
         ) {
-            removeResponseCallback(callId)
+            removeResponseCallback(callId, inviteCseq, SipMethod.INVITE)
             reconnectIms("call-waiting resume re-INVITE write failed")
             return false
         }
@@ -7398,7 +8290,7 @@ fun onWfcDisabled(reason: String) {
             call = acceptedCall,
             response = response,
             acceptedCallId = waitingCallId,
-        ) ?: return true
+        ) ?: return false
         prewarmIncomingMediaAfterAccept(acceptedCall)
         startIncomingInviteFinalResponseRetransmit(
             acceptedCallId = waitingCallId,
@@ -7413,12 +8305,17 @@ fun onWfcDisabled(reason: String) {
         pending: PendingWaitingInvite,
         reason: String,
     ) {
+        callSetupTimers.cancelAll(reason)
         rememberTerminatedIncomingCall(
             pending.callId,
             SipIncomingInviteFinalResponses.localRejectTerminationReason(),
         )
         val response = SipIncomingInviteFinalResponses.localRejectResponse(pending.callHeaders)
-        Rlog.w(TAG, "Rejecting pending waiting INVITE: callId=${pending.callId} reason=$reason response=$response")
+        Rlog.w(
+            TAG,
+            "Rejecting pending waiting INVITE: callId=${pending.callId} " +
+                "reason=$reason ${response.safeLogSummary()}",
+        )
         writeSipBytesWithFlush(
             pending.responseWriter,
             "pending waiting INVITE reject callId=${pending.callId}",
@@ -7518,8 +8415,8 @@ fun onWfcDisabled(reason: String) {
             request = request,
             incomingCallId = incomingCallId,
             logTag = TAG,
-            hasIncomingResponseWriter = requestWriters.containsKey(incomingCallId),
-            amrWbMediaCodecAvailable = amrWbMediaCodecAvailable,
+            hasIncomingResponseWriter = dispatcher.hasWriterForCallId(incomingCallId),
+            amrWbMediaCodecAvailable = carrierAmrWbMediaCodecAvailable,
             extractCallerNumberFromHeader = { header ->
                 normalizeIncomingCallerNumberForFramework(
                     extractCallerNumberFromHeader(header),
@@ -7580,6 +8477,7 @@ fun onWfcDisabled(reason: String) {
         request: SipRequest,
         incomingCallId: String,
         callerNumber: String,
+        callerPresentationRestricted: Boolean,
         selectedAudioCodec: NegotiatedAudioCodec,
         amrTrack: Int,
         amrTrackDesc: String,
@@ -7631,6 +8529,7 @@ fun onWfcDisabled(reason: String) {
             SipIncomingInviteDialogSetup.incomingCallNotificationExtras(
                 incomingCallId = incomingCallId,
                 selectedAudioCodec = selectedAudioCodec,
+                presentationRestricted = callerPresentationRestricted,
             ),
         )
 
@@ -7787,6 +8686,7 @@ fun onWfcDisabled(reason: String) {
                 request = request,
                 incomingCallId = incomingCallId,
                 callerNumber = incomingOffer.callerNumber,
+                callerPresentationRestricted = incomingOffer.callerPresentationRestricted,
                 selectedAudioCodec = incomingOffer.selectedAudioCodec,
                 amrTrack = incomingOffer.amrTrack,
                 amrTrackDesc = incomingOffer.amrTrackDesc,
@@ -7901,10 +8801,10 @@ fun onWfcDisabled(reason: String) {
         }
         val activeCall = currentCall
         val existingCall = callForIncomingInviteDialog(incomingCallId)
-        val isInDialogInvite = existingCall != null &&
+        val isInDialogInvite =
             request.headers["from"]?.any { it.contains(";tag=", ignoreCase = true) } == true &&
             request.headers["to"]?.any { it.contains(";tag=", ignoreCase = true) } == true
-        if (isInDialogInvite) {
+        if (existingCall != null && isInDialogInvite) {
             return handleInDialogInvite(request, existingCall, incomingResponseWriter)
         }
         handleDuplicateIncomingInviteForExistingDialog(
@@ -7917,6 +8817,16 @@ fun onWfcDisabled(reason: String) {
             incomingCallId = incomingCallId,
             incomingResponseWriter = incomingResponseWriter,
         )?.let { return it }
+
+        if (!effectiveVoiceEnabled()) {
+            Rlog.w(
+                TAG,
+                "Rejecting initial incoming INVITE because effective MMTEL voice " +
+                    "policy is disabled " +
+                    "callId=$incomingCallId",
+            )
+            return 480
+        }
 
         rejectIncomingInviteWhileBusyOrOutgoingPending(
             request = request,
@@ -7956,6 +8866,10 @@ fun onWfcDisabled(reason: String) {
             reconnectIms("fast incoming 180 Ringing write failed")
             return 0
         }
+        callSetupTimers.startIncoming(incomingCallId)
+        if (carrierSettings.callSignalingKeepAlivePolicy.startsForIncoming) {
+            callSignalingKeepAlive.start("incoming INVITE")
+        }
 
         startIncomingInviteDialogSetup(
             request = request,
@@ -7981,15 +8895,33 @@ fun onWfcDisabled(reason: String) {
         successCb: (() -> Unit),
         failCb: (() -> Unit),
     ) {
+        if (!effectiveSmsIpEnabled()) {
+            Rlog.w(TAG, "Effective carrier policy disables SMS over IMS")
+            failCb()
+            return
+        }
         if (smsFallbackPolicy.shouldBypass(realm)) {
             Rlog.w(TAG, "IMS SMS learned fallback: returning framework fallback without SIP MESSAGE")
             failCb()
             return
         }
-        smsHandler.sendSms(smsSmsc, pdu, ref, successCb, failCb)
+        myHandler.post {
+            try {
+                smsHandler.sendSms(smsSmsc, pdu, ref, successCb, failCb)
+            } catch (t: Throwable) {
+                Rlog.w(TAG, "Failed to send IMS SMS", t)
+                failCb()
+            }
+        }
     }
 
     fun sendSmsAck(token: Int, ref: Int, error: Boolean) {
-        smsHandler.sendSmsAck(token, ref, error)
+        myHandler.post {
+            try {
+                smsHandler.sendSmsAck(token, ref, error)
+            } catch (t: Throwable) {
+                Rlog.w(TAG, "Failed to send IMS SMS acknowledgement", t)
+            }
+        }
     }
 }
