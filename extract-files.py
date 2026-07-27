@@ -48,7 +48,12 @@ blob_fixups: blob_fixups_user_type = {
         .binary_regex_replace(b'ril.dds.call.ongoing', b'vendor.calls.slot_id')
         .sig_replace(
             '60 0E 40 F9 82 0C 80 52 24 00 80 52 E1 03 15 AA 08 00 40 F9 E3 03 14 AA',
-            '60 0E 40 F9 82 0C 80 52 24 00 80 52 E1 03 15 AA 08 00 40 F9 03 00 80 D2'),
+            '60 0E 40 F9 82 0C 80 52 24 00 80 52 E1 03 15 AA 08 00 40 F9 03 00 80 D2')
+        # Always emit uiccApplicationsEnablementChanged
+        .sig_replace(
+            '88 58 9D 52 1F 00 08 6B AB 01 00 54', '88 58 9D 52 1F 00 08 6B 1F 20 03 D5')
+        .sig_replace(
+            '88 58 9D 52 FF 02 08 6B AB 01 00 54', '88 58 9D 52 FF 02 08 6B 1F 20 03 D5'),
 } # fmt: skip
 
 module = ExtractUtilsModule(
