@@ -1,0 +1,4 @@
+# Torch strength control: cameraserver reads/writes the sm5714 flash sysfs node.
+allow cameraserver sysfs_camera:dir search;
+allow cameraserver sysfs_camera_writable:dir search;
+allow cameraserver sysfs_camera_writable:file rw_file_perms;

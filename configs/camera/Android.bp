@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: Apache-2.0
+
+cc_library_static {
+    name: "libcameraservice_extension.sm7125",
+    srcs: ["CameraProviderExtension.cpp"],
+    header_libs: ["libbase_headers"],
+}
