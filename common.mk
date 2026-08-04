@@ -122,6 +122,9 @@ PRODUCT_PACKAGES += \
 
 $(call soong_config_set_bool,samsungCameraVars,needs_sec_reserved_field,true)
 
+$(call soong_config_set_bool,camera,ext_lib,true)
+$(call soong_config_set,libcameraservice,ext_lib,//$(LOCAL_PATH)/configs/camera:libcameraservice_extension.sm7125)
+
 # CAS
 PRODUCT_PACKAGES += \
     android.hardware.cas@1.2-service
