@@ -8,9 +8,8 @@
 
 static constexpr const char* FLASH_NODE = "/sys/class/camera/flash/rear_flash";
 // SM5714 driver: 1001-1008 map to 50-225mA in 25mA steps (register offset 0x0-0x7),
-// >= 1009 maps to 225mA (0x7). Skip the 50mA step: it is below the LED's useful
-// minimum and makes the torch look like it's off at the lowest level.
-static const int32_t kLevelToRawValue[] = {0, 1002, 1003, 1004, 1006, 1008};
+// >= 1009 maps to 225mA (0x7).
+static const int32_t kLevelToRawValue[] = {0, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008};
 
 static std::mutex gStateMutex;
 static int32_t gLevel = 0;  // last requested strength level, 0 = off
@@ -18,7 +17,7 @@ static int32_t gRaw = 0;    // last raw value written to the node, 0 = off
 
 bool supportsTorchStrengthControlExt() { return true; }
 int32_t getTorchDefaultStrengthLevelExt() { return 1; }
-int32_t getTorchMaxStrengthLevelExt() { return 5; }
+int32_t getTorchMaxStrengthLevelExt() { return 8; }
 
 int32_t getTorchStrengthLevelExt() {
     std::lock_guard<std::mutex> lock(gStateMutex);
@@ -28,7 +27,7 @@ int32_t getTorchStrengthLevelExt() {
 void setTorchStrengthLevelExt(int32_t torchStrength, bool enabled) {
     int level = enabled ? torchStrength : 0;
     if (level < 0) level = 0;
-    if (level > 5) level = 5;
+    if (level > 8) level = 8;
     int raw = kLevelToRawValue[level];
 
     {
@@ -38,9 +37,6 @@ void setTorchStrengthLevelExt(int32_t torchStrength, bool enabled) {
     }
     android::base::WriteStringToFile(std::to_string(raw), FLASH_NODE);
 
-    // The Samsung torch service rewrites the node to its default (max) value
-    // shortly after the torch turns on, overriding our strength. Re-assert our
-    // value a short while later so the chosen level sticks.
     if (raw > 0) {
         std::thread([level, raw]() {
             for (int attempt = 0; attempt < 3; ++attempt) {
