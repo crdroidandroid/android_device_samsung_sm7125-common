@@ -22,17 +22,6 @@
          autodetected from the Configuration. -->
     <bool name="config_showNavigationBar">true</bool>
 
-    <!-- Flag specifying whether VoLTE should be available for carrier: independent of
-         carrier provisioning. If false: hard disabled. If true: then depends on carrier
-         provisioning, availability etc -->
-    <bool name="config_carrier_volte_available">true</bool>
-
-    <!-- Flag specifying whether VoLTE is available on device -->
-    <bool name="config_device_volte_available">true</bool>
-
-    <!-- Flag specifying whether VT is available on device -->
-    <bool name="config_device_vt_available">true</bool>
-
     <!-- Flag specifying whether WFC over IMS is available on device -->
         <bool name="config_device_wfc_ims_available">true</bool>
 
@@ -426,4 +415,21 @@
          This can be overridden to false for devices which can't send stk sms message via
          framework, but would be sent via modem. -->
     <bool name="config_stk_sms_send_support">true</bool>
+
+    <!-- IMS framework integration. -->
+    <bool name="config_carrier_volte_available">true</bool>
+    <bool name="config_device_volte_available">true</bool>
+    <bool name="config_device_vt_available">false</bool>
+
+    <!-- Keep serving-cell identity available to the system IMS stack. -->
+    <string-array name="config_serviceStateLocationAllowedPackages">
+        <item>com.android.phone</item>
+        <item>com.android.imsstack</item>
+    </string-array>
+
+    <string name="config_wlan_data_service_package">com.google.android.iwlan</string>
+    <string name="config_wlan_network_service_package">com.google.android.iwlan</string>
+    <string name="config_qualified_networks_service_package">com.android.telephony.qns</string>
+
+    <bool name="config_use_voip_mode_for_ims">true</bool>
 </resources>

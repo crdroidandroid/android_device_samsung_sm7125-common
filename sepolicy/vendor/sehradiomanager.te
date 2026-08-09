@@ -11,3 +11,6 @@ binder_call(sehradiomanager, hwservicemanager)
 binder_call(sehradiomanager, servicemanager)
 binder_call(servicemanager, sehradiomanager)
 hal_client_domain(sehradiomanager, hal_telephony)
+
+# IMS
+allow sehradiomanager vendor_ims_prop:property_service set;

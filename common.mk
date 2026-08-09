@@ -458,7 +458,19 @@ PRODUCT_SOONG_NAMESPACES += \
     hardware/google/pixel/pixelstats \
     hardware/google/pixel/power-libperfmgr \
     hardware/google/pixel/thermal \
-    hardware/samsung
+    hardware/samsung \
+    vendor/lineage/imsstack-carrier-config-ext
+
+# Userspace IMS and its framework bearer services
+$(call inherit-product, packages/modules/ImsMedia/imsmedia.mk)
+$(call inherit-product, packages/apps/CarrierSettings/carrier_settings.mk)
+
+PRODUCT_PACKAGES += \
+    CarrierConfigResCommon \
+    ImsStack \
+    ImsStackOverlay \
+    Iwlan \
+    QualifiedNetworksService
 
 # Inherit proprietary blobs
 $(call inherit-product, vendor/samsung/sm7125-common/sm7125-common-vendor.mk)
