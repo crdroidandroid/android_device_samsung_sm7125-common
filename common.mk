@@ -217,6 +217,9 @@ $(call soong_config_set,lineage_health,fast_charge_node,/sys/class/sec/switch/af
 $(call soong_config_set,lineage_health,fast_charge_value_none,1)
 $(call soong_config_set,lineage_health,fast_charge_value_fast_charge,0)
 
+# IMS
+$(call inherit-product, hardware/lineage/generic-ims/ims.mk)
+
 # FlipFlap
 PRODUCT_PACKAGES += \
     FlipFlap
