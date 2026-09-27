@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.lineageos.carriersettings"
+    android:versionCode="1"
+    android:versionName="2026.09.20">
+    <application android:hasCode="false"
+        android:label="Carrier Settings"
+        android:allowBackup="false"
+        android:directBootAware="true">
+        <meta-data android:name="org.lineageos.carriersettings.SCHEMA_VERSION"
+            android:value="1" />
+    </application>
+</manifest>

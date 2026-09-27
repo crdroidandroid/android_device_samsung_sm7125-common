@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <string name="ims.ims_user_agent_string">#MODEL#_#BUILD#</string>
+    <int-array name="ims.ipsec_encryption_algorithms_int_array" num="1">
+        <item value="0" />
+    </int-array>
+    <int name="ims.ipv4_sip_mtu_size_cellular_int" value="1440" />
+    <int name="ims.ipv6_sip_mtu_size_cellular_int" value="1440" />
+    <int name="ims.registration_retry_base_timer_millis_int" value="10000" />
+    <int name="ims.request_uri_type_int" value="1" />
+    <int name="ims.sip_preferred_transport_int" value="0" />
+    <int name="ims.sip_timer_b_millis_int" value="10000" />
+    <int name="ims.sip_timer_c_millis_int" value="180000" />
+    <int name="ims.sip_timer_d_millis_int" value="128000" />
+    <int name="ims.sip_timer_f_millis_int" value="30000" />
+    <int name="ims.sip_timer_h_millis_int" value="30000" />
+    <int name="ims.sip_timer_j_millis_int" value="30000" />
+    <int name="ims.sip_timer_t1_millis_int" value="3000" />
+    <int name="imsss.ut_as_server_port_int" value="8090" />
+    <int-array name="imsss.ut_server_based_services_int_array" num="8">
+        <item value="1" />
+        <item value="3" />
+        <item value="4" />
+        <item value="7" />
+        <item value="6" />
+        <item value="5" />
+        <item value="2" />
+        <item value="0" />
+    </int-array>
+    <int-array name="imsss.ut_terminal_based_services_int_array" num="1">
+        <item value="10" />
+    </int-array>
+    <pbundle_as_map name="imsvoice.amrwb_payload_description_bundle">
+        <pbundle_as_map name="104">
+            <int-array name="imsvoice.amr_codec_attribute_modeset_int_array" num="3">
+                <item value="0" />
+                <item value="1" />
+                <item value="2" />
+            </int-array>
+        </pbundle_as_map>
+    </pbundle_as_map>
+    <pbundle_as_map name="imsvoice.audio_codec_capability_payload_types_bundle">
+        <int-array name="imsvoice.amrnb_payload_type_int_array" num="1">
+            <item value="102" />
+        </int-array>
+        <int-array name="imsvoice.amrwb_payload_type_int_array" num="1">
+            <item value="104" />
+        </int-array>
+        <int-array name="imsvoice.dtmfnb_payload_type_int_array" num="1">
+            <item value="97" />
+        </int-array>
+        <int-array name="imsvoice.dtmfwb_payload_type_int_array" num="1">
+            <item value="96" />
+        </int-array>
+    </pbundle_as_map>
+    <int name="imsvoice.audio_rr_bandwidth_bps_int" value="0" />
+    <int name="imsvoice.audio_rs_bandwidth_bps_int" value="0" />
+    <string name="imsvoice.conference_factory_uri_string">mmtel@3pty-factory.ims.mnc051.mcc440.3gppnetwork.org</string>
+    <int name="imsvoice.mo_call_request_timeout_millis_int" value="10000" />
+    <boolean name="imsvoice.prack_supported_for_18x_bool" value="true" />
+    <int name="imsvoice.ringback_timer_millis_int" value="3600000" />
+    <int name="imsvoice.ringing_timer_millis_int" value="80000" />
+    <int name="imsvoice.session_privacy_type_int" value="2" />
+</carrier_config>

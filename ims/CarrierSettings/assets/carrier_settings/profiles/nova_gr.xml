@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <string name="imsss.ut_as_server_fqdn_string">xcap.ims.mnc010.mcc202.pub.3gppnetwork.org</string>
+    <int name="imsss.ut_as_server_port_int" value="8090" />
+    <int name="imsss.ut_iptype_home_int" value="0" />
+    <int name="imsss.ut_iptype_roaming_int" value="0" />
+    <string name="imsvoice.conference_factory_uri_string">conf@ims.wind.gr</string>
+</carrier_config>

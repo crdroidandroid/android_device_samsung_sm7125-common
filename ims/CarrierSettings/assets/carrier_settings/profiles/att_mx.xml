@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <int name="ims.registration_retry_base_timer_millis_int" value="10000" />
+    <int name="ims.registration_retry_max_timer_millis_int" value="7200000" />
+    <int name="ims.request_uri_type_int" value="1" />
+    <int name="ims.sip_timer_c_millis_int" value="180000" />
+    <int name="ims.sip_timer_f_millis_int" value="20000" />
+    <int name="ims.sip_timer_t2_millis_int" value="4000" />
+    <int name="ims.sip_timer_t4_millis_int" value="5000" />
+    <string name="imsss.ut_as_server_fqdn_string">xcap.ims.attmex.mx</string>
+    <int name="imsss.ut_as_server_port_int" value="443" />
+    <int-array name="imsss.ut_server_based_services_int_array" num="22">
+        <item value="20" />
+        <item value="12" />
+        <item value="18" />
+        <item value="14" />
+        <item value="19" />
+        <item value="21" />
+        <item value="15" />
+        <item value="16" />
+        <item value="17" />
+        <item value="13" />
+        <item value="1" />
+        <item value="3" />
+        <item value="4" />
+        <item value="7" />
+        <item value="6" />
+        <item value="5" />
+        <item value="2" />
+        <item value="0" />
+        <item value="10" />
+        <item value="8" />
+        <item value="9" />
+        <item value="11" />
+    </int-array>
+    <int-array name="imsss.ut_terminal_based_services_int_array" num="0" />
+    <pbundle_as_map name="imsvoice.amrwb_payload_description_bundle">
+        <pbundle_as_map name="100">
+            <int-array name="imsvoice.amr_codec_attribute_modeset_int_array" num="3">
+                <item value="0" />
+                <item value="1" />
+                <item value="2" />
+            </int-array>
+        </pbundle_as_map>
+        <pbundle_as_map name="105">
+            <int-array name="imsvoice.amr_codec_attribute_modeset_int_array" num="3">
+                <item value="0" />
+                <item value="1" />
+                <item value="2" />
+            </int-array>
+            <int name="imsvoice.amr_codec_attribute_payload_format_int" value="1" />
+        </pbundle_as_map>
+    </pbundle_as_map>
+    <pbundle_as_map name="imsvoice.audio_codec_capability_payload_types_bundle">
+        <int-array name="imsvoice.amrnb_payload_type_int_array" num="2">
+            <item value="98" />
+            <item value="103" />
+        </int-array>
+        <int-array name="imsvoice.amrwb_payload_type_int_array" num="2">
+            <item value="100" />
+            <item value="105" />
+        </int-array>
+        <int-array name="imsvoice.dtmfnb_payload_type_int_array" num="1">
+            <item value="97" />
+        </int-array>
+        <int-array name="imsvoice.dtmfwb_payload_type_int_array" num="1">
+            <item value="96" />
+        </int-array>
+    </pbundle_as_map>
+    <string name="imsvoice.conference_factory_uri_string">ALU_CONF@ims.attmex.mx</string>
+    <int name="imsvoice.conference_subscribe_type_int" value="0" />
+    <int name="imsvoice.mo_call_request_timeout_millis_int" value="11000" />
+    <int name="imsvoice.ringback_timer_millis_int" value="60000" />
+    <int name="imsvoice.ringing_timer_millis_int" value="60000" />
+</carrier_config>

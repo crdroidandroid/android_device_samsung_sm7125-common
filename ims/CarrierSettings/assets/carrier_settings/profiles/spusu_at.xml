@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <int name="ims.request_uri_type_int" value="1" />
+    <boolean name="ims.sip_over_ipsec_enabled_bool" value="false" />
+    <int name="ims.sip_preferred_transport_int" value="0" />
+</carrier_config>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<config>
+    <!-- ImsStack runs in the system user, including on headless-system-user products. -->
+    <install-in-user-type package="org.lineageos.carriersettings">
+        <install-in user-type="SYSTEM" />
+    </install-in-user-type>
+</config>

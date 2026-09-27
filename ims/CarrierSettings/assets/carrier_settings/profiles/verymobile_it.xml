@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <int name="ims.ipv4_sip_mtu_size_cellular_int" value="1450" />
+    <int name="ims.ipv6_sip_mtu_size_cellular_int" value="1450" />
+    <int name="ims.registration_retry_max_timer_millis_int" value="300000" />
+    <int name="ims.request_uri_type_int" value="1" />
+    <int name="imsss.ut_iptype_home_int" value="0" />
+    <boolean name="imsss.ut_requires_ims_registration_bool" value="true" />
+    <boolean name="imsss.ut_supported_when_roaming_bool" value="false" />
+    <int name="imsvoice.conference_subscribe_type_int" value="0" />
+    <boolean name="imsvoice.prack_supported_for_18x_bool" value="true" />
+    <int name="imsvoice.ringback_timer_millis_int" value="67000" />
+    <int name="imsvoice.ringing_timer_millis_int" value="65000" />
+</carrier_config>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <string name="imsss.ut_as_server_fqdn_string">xcap.ims.mnc390.mcc313.3gppnetwork.org</string>
+    <int name="imsss.ut_iptype_home_int" value="0" />
+    <int name="imsss.ut_iptype_roaming_int" value="0" />
+    <boolean name="imsvoice.include_caller_id_service_codes_in_sip_invite_bool" value="true" />
+</carrier_config>

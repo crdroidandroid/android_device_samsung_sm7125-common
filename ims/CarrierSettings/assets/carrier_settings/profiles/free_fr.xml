@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <boolean name="ims.gruu_enabled_bool" value="true" />
+    <int name="ims.ipv4_sip_mtu_size_cellular_int" value="1280" />
+    <int name="ims.ipv6_sip_mtu_size_cellular_int" value="1280" />
+    <boolean name="imsvoice.prack_supported_for_18x_bool" value="true" />
+    <int name="imsvoice.ringback_timer_millis_int" value="120000" />
+    <int name="imsvoice.ringing_timer_millis_int" value="120000" />
+</carrier_config>

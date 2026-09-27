@@ -1,0 +1,607 @@
+/*
+ * Copyright (C) 2022 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "AString.h"
+#include "CarrierConfig.h"
+#include "Connector.h"
+#include "Engine.h"
+#include "ICapabilities.h"
+#include "ICarrierConfig.h"
+#include "IConfiguration.h"
+#include "ICoreService.h"
+#include "IFeatureCaps.h"
+#include "IImsAos.h"
+#include "IIpcan.h"
+#include "IJniEnabler.h"
+#include "IJniMtcServiceThread.h"
+#include "IMtcCallController.h"
+#include "IMtcContext.h"
+#include "IMtcImsEventReceiver.h"
+#include "IMtcService.h"
+#include "IPageMessage.h"
+#include "IPhoneInfoSubscriber.h"
+#include "IReference.h"
+#include "IServiceFilterCriteria.h"
+#include "ISipRoutingRejectNotifier.h"
+#include "ImsAos.h"
+#include "ImsAosParameter.h"
+#include "ImsCore.h"
+#include "ImsEventDef.h"
+#include "ImsServiceConfig.h"
+#include "JniEnablerConnector.h"
+#include "MtcRoutingRejectHandler.h"
+#include "MtcService.h"
+#include "ServiceConfig.h"
+#include "ServicePhoneInfo.h"
+#include "ServiceTrace.h"
+#include "SipFactory.h"
+#include "SipMethod.h"
+#include "SipStatusCode.h"
+#include "TriggerPoint.h"
+#include "common/IAppConfig.h"
+#include "common/ICoreServiceConfig.h"
+#include "common/IMediaConfig.h"
+#include "configuration/MtcConfigurationProxy.h"
+#include "emergency/IMtcEmergencyServiceManager.h"
+#include "helper/IMtcNetworkWatcherListener.h"
+#include "helper/MtcAosConnector.h"
+#include "helper/MtcAosEventHandler.h"
+#include "helper/MtcCapabilityQueryHandler.h"
+#include "helper/MtcNetworkWatcher.h"
+#include "helper/MtcPermanentSupplementaryService.h"
+#include "helper/SrvccStateManager.h"
+#include "helper/SsacTimerHandler.h"
+
+__IMS_TRACE_TAG_COM_MTC__;
+
+LOCAL IMS_CHAR FEATURE_TAG_CALL_COMPOSER[] = "+g.gsma.callcomposer";
+
+PUBLIC
+MtcService::MtcService(IN IMtcContext& objContext, IN ServiceType eType) :
+        ImsService(AString::ConstNull()),
+        m_bFeatureAddedForCallComposer(IMS_FALSE),
+        m_bCrossSimConnected(IMS_FALSE),
+        m_eType(eType),
+        m_objContext(objContext),
+        m_strServiceName(GetServiceName(eType)),
+        m_eOldStatus(ServiceStatus::SERVICE_IDLE),
+        m_eStatus(ServiceStatus::SERVICE_IDLE),
+        m_piCoreService(IMS_NULL),
+        m_pAosConnector(IMS_NULL),
+        m_pAosEventHandler(IMS_NULL),
+        m_pSrvccStateManager(IMS_NULL),
+        m_pNetworkWatcher(IMS_NULL),
+        m_pRoutingRejectHandler(IMS_NULL),
+        m_objSsacTimerHandler(SsacTimerHandler(m_objContext)),
+        m_pPermanentSuppService(std::make_unique<MtcPermanentSupplementaryService>())
+{
+    IMS_TRACE_I("+MtcService [%d][%s]", m_objContext.GetSlotId(),
+            m_eType == ServiceType::EMERGENCY ? "emergency" : "normal", 0);
+    Init();
+}
+
+PUBLIC VIRTUAL MtcService::~MtcService()
+{
+    IMS_TRACE_I("~MtcService [%d][%s]", m_objContext.GetSlotId(),
+            m_eType == ServiceType::EMERGENCY ? "emergency" : "normal", 0);
+
+    if (m_eType == ServiceType::NORMAL)
+    {
+        JniEnablerConnector::GetInstance().SetNativeEnabler(
+                m_objContext.GetSlotId(), EnablerType::MTC_SERVICE, IMS_NULL);
+    }
+
+    if (m_piCoreService)
+    {
+        m_piCoreService->SetListener(IMS_NULL);
+        m_piCoreService->Close();
+        m_piCoreService = IMS_NULL;
+    }
+
+    SetAosReady(IMS_FALSE);
+    delete m_pAosConnector;
+
+    IImsAos* piImsAos = ImsAos::GetImsAos(ImsServiceConfig::GetAppName(ImsAppId::MTC),
+            m_strServiceName, m_objContext.GetSlotId());
+    if (piImsAos != IMS_NULL)
+    {
+        piImsAos->SetListener(IMS_NULL);
+        piImsAos->SetMonitor(IMS_NULL);
+    }
+
+    delete m_pAosEventHandler;
+    delete m_pSrvccStateManager;
+
+    if (m_pRoutingRejectHandler)
+    {
+        ISipRoutingRejectNotifier* piRoutingRejectNotifier =
+                SipFactory::GetRoutingRejectNotifier(m_objContext.GetSlotId());
+        piRoutingRejectNotifier->RemoveListener(m_pRoutingRejectHandler);
+        delete m_pRoutingRejectHandler;
+    }
+
+    delete m_pNetworkWatcher;
+}
+
+PUBLIC VIRTUAL void MtcService::AddAosStateListener(IN IMtcAosStateListener* piListener)
+{
+    m_pAosEventHandler->AddListener(piListener);
+}
+
+PUBLIC VIRTUAL void MtcService::RemoveAosStateListener(IN IMtcAosStateListener* piListener)
+{
+    m_pAosEventHandler->RemoveListener(piListener);
+}
+
+PUBLIC VIRTUAL void MtcService::AddSrvccStateListener(IN ISrvccStateListener* piListener)
+{
+    m_pSrvccStateManager->AddListener(piListener);
+}
+
+PUBLIC VIRTUAL void MtcService::RemoveSrvccStateListener(IN ISrvccStateListener* piListener)
+{
+    m_pSrvccStateManager->RemoveListener(piListener);
+}
+
+PUBLIC VIRTUAL void MtcService::AddNetworkWatcherListener(IN IMtcNetworkWatcherListener* piListener)
+{
+    m_pNetworkWatcher->AddListener(*piListener);
+}
+
+PUBLIC VIRTUAL void MtcService::RemoveNetworkWatcherListener(
+        IN IMtcNetworkWatcherListener* piListener)
+{
+    m_pNetworkWatcher->RemoveListener(*piListener);
+}
+
+PUBLIC VIRTUAL IMS_SINT32 MtcService::GetRatType() const
+{
+    return m_pNetworkWatcher->GetRatType();
+}
+
+PUBLIC VIRTUAL IMS_SINT32 MtcService::GetMobileRatType() const
+{
+    return m_pNetworkWatcher->GetMobileRatType();
+}
+
+PUBLIC VIRTUAL IMS_SINT32 MtcService::GetLastConnectedRatType() const
+{
+    return m_pNetworkWatcher->GetLastConnectedRatType();
+}
+
+PUBLIC VIRTUAL IMS_BOOL MtcService::IsNr() const
+{
+    if (IsWlanIpCanType())
+    {
+        return IMS_FALSE;
+    }
+
+    return PhoneInfoService::GetPhoneInfoService()
+                   ->GetNetworkWatcher(m_objContext.GetSlotId())
+                   ->GetNetRadioTechType() == NW_REPORT_RADIO_NR;
+}
+
+PUBLIC VIRTUAL IMS_BOOL MtcService::IsEpsOnlyAttach() const
+{
+    return PhoneInfoService::GetPhoneInfoService()
+                    ->GetNetworkWatcher(m_objContext.GetSlotId())
+                    ->GetNetRadioTechType() == NW_REPORT_RADIO_LTE &&
+            m_objContext.GetImsEventReceiver().GetWParam(IMS_EVENT_LTE_INFO) ==
+            IMS_LTE_INFO_EPS_ONLY_ATTACHED;
+}
+
+PUBLIC VIRTUAL IMS_BOOL MtcService::IsEpsCombinedAttach() const
+{
+    return PhoneInfoService::GetPhoneInfoService()
+                    ->GetNetworkWatcher(m_objContext.GetSlotId())
+                    ->GetNetRadioTechType() == NW_REPORT_RADIO_LTE &&
+            m_objContext.GetImsEventReceiver().GetWParam(IMS_EVENT_LTE_INFO) ==
+            IMS_LTE_INFO_COMBINED_ATTACHED;
+}
+
+PUBLIC VIRTUAL IMS_BOOL MtcService::IsRoaming() const
+{
+    return m_objContext.GetImsEventReceiver().GetWParam(IMS_EVENT_ROAMING_STATE) ==
+            IMS_ROAMING_STATE_ON;
+}
+
+PUBLIC VIRTUAL IMS_SINT32 MtcService::GetNetworkRoamingType() const
+{
+    INetworkWatcher* piNetworkWatcher =
+            PhoneInfoService::GetPhoneInfoService()->GetNetworkWatcher(m_objContext.GetSlotId());
+    IMS_SINT32 nDataRoamingType = piNetworkWatcher->GetDataRoamingType();
+
+    if (nDataRoamingType == INetworkWatcher::ROAMING_TYPE_DOMESTIC ||
+            nDataRoamingType == INetworkWatcher::ROAMING_TYPE_INTERNATIONAL)
+    {
+        return nDataRoamingType;
+    }
+
+    if (nDataRoamingType == INetworkWatcher::ROAMING_TYPE_NOT_ROAMING &&
+            !piNetworkWatcher->IsDataNetworkRoaming())
+    {
+        return INetworkWatcher::ROAMING_TYPE_NOT_ROAMING;
+    }
+
+    ISubscriberInfo* piSubscriberInfo =
+            PhoneInfoService::GetPhoneInfoService()->GetSubscriberInfo(m_objContext.GetSlotId());
+    AString strSimCountryIso;
+    piSubscriberInfo->GetSimCountryIso(strSimCountryIso);
+    AString strNetworkCountryIso;
+    piSubscriberInfo->GetNetworkCountryIso(strNetworkCountryIso);
+
+    if (strSimCountryIso.IsEmpty() || strNetworkCountryIso.IsEmpty())
+    {
+        return INetworkWatcher::ROAMING_TYPE_UNKNOWN;
+    }
+
+    if (strSimCountryIso.Equals(strNetworkCountryIso))
+    {
+        return INetworkWatcher::ROAMING_TYPE_DOMESTIC;
+    }
+
+    return INetworkWatcher::ROAMING_TYPE_INTERNATIONAL;
+}
+
+PUBLIC VIRTUAL IMS_BOOL MtcService::IsWlanIpCanType() const
+{
+    if (m_pAosConnector == IMS_NULL)
+    {
+        return IMS_FALSE;
+    }
+
+    return m_pAosConnector->GetIpcanType() == IIpcan::CATEGORY_WLAN;
+}
+
+PUBLIC VIRTUAL IJniMtcServiceThread* MtcService::GetJniServiceThread() const
+{
+    const IJniEnabler* piJniEnabler = JniEnablerConnector::GetInstance().GetJniEnabler(
+            m_objContext.GetSlotId(), EnablerType::MTC_SERVICE);
+    if (piJniEnabler == IMS_NULL)
+    {
+        IMS_TRACE_E(0, "JniMtcServiceThread is null", 0, 0, 0);
+        return IMS_NULL;
+    }
+
+    return reinterpret_cast<IJniMtcServiceThread*>(piJniEnabler->GetJniThread());
+}
+
+PUBLIC VIRTUAL void MtcService::UpdateSrvccState(IN SrvccState eState)
+{
+    m_pSrvccStateManager->UpdateSrvccState(eState);
+    if (m_eType == ServiceType::NORMAL)
+    {
+        // UpdateSrvccState is invoked only for ServiceType::NORMAL.
+        IMtcService* piEmergencyService = m_objContext.GetServiceByType(ServiceType::EMERGENCY);
+        if (piEmergencyService)
+        {
+            piEmergencyService->UpdateSrvccState(eState);
+        }
+    }
+}
+
+PUBLIC VIRTUAL void MtcService::UpdatePermanentSuppServices(
+        IN const ImsList<SuppService*>& objSuppServices)
+{
+    m_pPermanentSuppService->UpdateServices(objSuppServices);
+}
+
+PUBLIC VIRTUAL IMS_BOOL MtcService::IsPermanentSuppServiceEnabled(
+        IN PermanentSuppType ePermanentSuppType)
+{
+    return m_pPermanentSuppService->IsEnabled(ePermanentSuppType);
+}
+
+PUBLIC VIRTUAL void MtcService::OpenEmergencyService(IN ServiceType eServiceType)
+{
+    IMS_TRACE_I("OpenEmergencyService [%d]", eServiceType, 0, 0);
+    m_objContext.GetEmergencyServiceManager().StartOpen(eServiceType);
+}
+
+PUBLIC VIRTUAL void MtcService::StopEmergencyService()
+{
+    IMS_TRACE_I("StopEmergencyService", 0, 0, 0);
+    m_objContext.GetEmergencyServiceManager().StopOpen(IMS_TRUE);
+}
+
+PUBLIC VIRTUAL void MtcService::ProcessTestCommand(
+        IN IMS_SINT32 nCommand, IN IMS_SINT32 nWParam, IN IMS_SINT32 nLParam)
+{
+    IMS_TRACE_I("ProcessTestCommand [%d %d %d]", nCommand, nWParam, nLParam);
+    switch (nCommand)
+    {
+        case static_cast<IMS_SINT32>(TestCommand::AOS_CONNECTED):
+            ImsAos_Connected((IMS_UINT32)nWParam, (IMS_UINT32)nLParam);
+            break;
+        case static_cast<IMS_SINT32>(TestCommand::AOS_DISCONNECTED):
+            ImsAos_Disconnected((IMS_UINT32)nWParam, (IMS_SINT32)nLParam);
+            break;
+        case static_cast<IMS_SINT32>(TestCommand::RAT_CHANGED):
+            m_pNetworkWatcher->UpdateMobileRat((IMS_SINT32)nWParam);
+            break;
+        default:
+            break;
+    }
+}
+
+PUBLIC VIRTUAL void MtcService::CoreService_PageMessageReceived(
+        IN [[maybe_unused]] ICoreService* piService, IN IPageMessage* piMessage)
+{
+    IMS_TRACE_I("CoreService_PageMessageReceived", 0, 0, 0);
+    piMessage->Reject(SipStatusCode::SC_488);
+    piMessage->Destroy();
+}
+
+PUBLIC VIRTUAL void MtcService::CoreService_ReferenceReceived(
+        IN [[maybe_unused]] ICoreService* piService, IN IReference* piReference)
+{
+    IMS_TRACE_I("CoreService_ReferenceReceived", 0, 0, 0);
+    piReference->RejectEx(SipStatusCode::SC_488);
+    piReference->Destroy();
+}
+
+PUBLIC VIRTUAL void MtcService::CoreService_SessionInvitationReceived(
+        IN [[maybe_unused]] ICoreService* piService, IN ISession* piSession)
+{
+    IMS_TRACE_I("CoreService_SessionInvitationReceived", 0, 0, 0);
+    m_objContext.GetCallController().HandleIncoming(this, piSession);
+}
+
+PUBLIC VIRTUAL void MtcService::CoreService_CapabilityQueryReceived(
+        IN ICoreService* piService, IN ICapabilities* piCapabilities)
+{
+    const IAppConfig* piAppConfig = Engine::GetConfiguration()->GetAppConfig(
+            ImsServiceConfig::GetAppName(ImsAppId::MTC), m_objContext.GetSlotId());
+    const ICoreServiceConfig* piCoreServiceConfig =
+            piAppConfig ? piAppConfig->GetCoreServiceConfig(m_strServiceName) : IMS_NULL;
+    const IMediaConfig* piMediaConfig =
+            Engine::GetConfiguration()->GetMediaConfig(m_objContext.GetSlotId());
+    IMS_UINT32 nFeatures = m_pAosConnector ? m_pAosConnector->GetFeatures() : 0;
+
+    MtcCapabilityQueryHandler(m_objContext, piCoreServiceConfig, piMediaConfig)
+            .HandleIncomingCapabilityQuery(piService, piCapabilities, nFeatures);
+}
+
+PUBLIC VIRTUAL void MtcService::ImsAos_Connected(IN IMS_UINT32 nFeatures, IN IMS_UINT32 nIpcan)
+{
+    IMS_TRACE_I("ImsAos_Connected emergency[%s], ipcan[%d]", _TRACE_B_(IsEmergency()), nIpcan, 0);
+    SetStatus(ServiceStatus::SERVICE_ACTIVE);
+    m_bCrossSimConnected = m_pAosConnector->IsCrossSimConnected();
+    if (!IsEmergency())
+    {
+        UpdateCallComposerFeature(nFeatures);
+    }
+
+    m_pNetworkWatcher->OnConnected(nIpcan);
+    m_pAosEventHandler->OnConnected(nFeatures);
+    SetAosReady(IMS_TRUE);
+}
+
+PUBLIC VIRTUAL void MtcService::ImsAos_Disconnecting(IN IMS_UINT32 nReason)
+{
+    IMS_TRACE_I(
+            "ImsAos_Disconnecting emergency[%s] nReason[%d]", _TRACE_B_(IsEmergency()), nReason, 0);
+    m_pAosEventHandler->OnDisconnecting(nReason);
+}
+
+PUBLIC VIRTUAL void MtcService::ImsAos_Disconnected(
+        IN IMS_UINT32 nReason, IN IMS_SINT32 nDataFailureReason)
+{
+    IMS_TRACE_I(
+            "ImsAos_Disconnected emergency[%s] nReason[%d]", _TRACE_B_(IsEmergency()), nReason, 0);
+
+    SetStatus(ServiceStatus::SERVICE_IDLE);
+    m_pNetworkWatcher->OnDisconnected();
+    m_pAosEventHandler->OnDisconnected(nReason, nDataFailureReason);
+}
+
+PUBLIC VIRTUAL void MtcService::ImsAos_Suspended(IN IMS_UINT32 nReason)
+{
+    IMS_TRACE_I("ImsAos_Suspended emergency[%s] nReason[%d]", _TRACE_B_(IsEmergency()), nReason, 0);
+    SetStatus(ServiceStatus::SERVICE_SUSPENDED);
+    m_pAosEventHandler->OnSuspended(nReason);
+}
+
+PUBLIC VIRTUAL void MtcService::ImsAos_Resumed()
+{
+    IMS_TRACE_I("ImsAos_Resumed emergency[%s]", _TRACE_B_(IsEmergency()), 0, 0);
+    SetStatus(ServiceStatus::SERVICE_ACTIVE);
+    m_pAosEventHandler->OnResumed();
+}
+
+PUBLIC VIRTUAL void MtcService::ImsAosMonitor_Connected(
+        IN IMS_UINT32 nServices, IN IMS_UINT32 nIpcan)
+{
+    m_pAosEventHandler->OnServiceConnected(nServices, nIpcan);
+}
+
+PUBLIC VIRTUAL void MtcService::ImsAosMonitor_Notify(IN IMS_UINT32 nType, IN IMS_UINT32 nState)
+{
+    IMS_TRACE_I("ImsAosMonitor_Notify :: nType(%d), nState(%d)", nType, nState, 0);
+
+    if (nType == IImsAosMonitor::TYPE_REG_RECOVERY_PENDING)
+    {
+        // Registration refreshing is pending so AoS cannot trigger ImsAos_Connected() even if
+        // the registered IP CAN is updated.
+        IMS_UINT32 eStoredIpcanType =
+                m_pNetworkWatcher->GetRatType() == INetworkWatcher::RADIOTECH_TYPE_IWLAN
+                ? IIpcan::CATEGORY_WLAN
+                : IIpcan::CATEGORY_MOBILE;
+        IMS_UINT32 eCurrentPdnIpcanType = m_pAosConnector->GetIpcanType();
+        if (eStoredIpcanType != eCurrentPdnIpcanType)
+        {
+            m_pNetworkWatcher->OnConnected(eCurrentPdnIpcanType);
+        }
+    }
+    else if (nType == IImsAosMonitor::TYPE_CROSS_SIM_STATUS)
+    {
+        m_bCrossSimConnected = nState;
+    }
+
+    m_pAosEventHandler->OnEventNotify(nType, nState);
+}
+
+PRIVATE
+void MtcService::Init()
+{
+    if (m_eType == ServiceType::NORMAL)
+    {
+        JniEnablerConnector::GetInstance().SetNativeEnabler(
+                m_objContext.GetSlotId(), EnablerType::MTC_SERVICE, this);
+    }
+
+    m_pAosEventHandler = new MtcAosEventHandler(*this, m_objContext.GetConfigurationProxy());
+    m_pSrvccStateManager = new SrvccStateManager();
+    m_pNetworkWatcher = new MtcNetworkWatcher(*this, m_objContext.GetSlotId());
+
+    AttachCoreServiceInterface();
+    AttachAosInterface();
+
+    if (m_objContext.GetConfigurationProxy().GetBoolean(ConfigVoice::
+                        KEY_USE_CARRIER_SPECIFIC_REJECT_PHRASE_FOR_INCOMING_CALL_DURING_NO_REGISTRATION_BOOL))
+    {
+        m_pRoutingRejectHandler = new MtcRoutingRejectHandler(m_objContext,
+                *PhoneInfoService::GetPhoneInfoService()->GetNetworkWatcher(
+                        m_objContext.GetSlotId()));
+
+        ISipRoutingRejectNotifier* piRoutingRejectNotifier =
+                SipFactory::GetRoutingRejectNotifier(m_objContext.GetSlotId());
+        piRoutingRejectNotifier->AddListener(m_pRoutingRejectHandler);
+    }
+}
+
+PRIVATE
+void MtcService::SetStatus(IN ServiceStatus eStatus)
+{
+    m_eOldStatus = m_eStatus;
+    m_eStatus = eStatus;
+}
+
+PRIVATE
+AString MtcService::GetServiceName(IN ServiceType eType)
+{
+    if (eType == ServiceType::EMERGENCY)
+    {
+        return ImsServiceConfig::GetServiceName(ImsServiceId::MTC_EMERGENCY);
+    }
+    return ImsServiceConfig::GetServiceName(ImsServiceId::MTC);
+}
+
+PRIVATE
+void MtcService::AttachCoreServiceInterface()
+{
+    AString strParams;
+    strParams.Sprintf("%s=%s", "serviceId", m_strServiceName.GetStr());
+    AString strAppName = ImsServiceConfig::GetAppName(ImsAppId::MTC);
+
+    m_piCoreService = reinterpret_cast<ICoreService*>(
+            Connector::Open(ImsCore::CONNECTION_SCHEME, strAppName, strParams));
+
+    if (m_piCoreService == IMS_NULL)
+    {
+        IMS_TRACE_E(0, "m_piCoreService is NULL", 0, 0, 0);
+        return;
+    }
+    m_piCoreService->SetListener(this);
+    SetServiceFilterCriteria();
+
+    IMS_TRACE_I("AttachCoreServiceInterface : AppName[%s] StrParams[%s]", strAppName.GetStr(),
+            strParams.GetStr(), 0);
+}
+
+PRIVATE
+void MtcService::AttachAosInterface()
+{
+    IImsAos* piImsAos = ImsAos::GetImsAos(ImsServiceConfig::GetAppName(ImsAppId::MTC),
+            m_strServiceName, m_objContext.GetSlotId());
+
+    if (piImsAos == IMS_NULL)
+    {
+        IMS_TRACE_E(0, "piImsAos is NULL", 0, 0, 0);
+        return;
+    }
+    piImsAos->SetListener(this);
+    piImsAos->SetMonitor(this);
+    m_pAosConnector = new MtcAosConnector(*piImsAos, *(piImsAos->GetAosInfo()));
+}
+
+PRIVATE
+void MtcService::SetServiceFilterCriteria() const
+{
+    IServiceFilterCriteria* piSfc = m_piCoreService->GetFilterCriteria();
+
+    if (piSfc == IMS_NULL)
+    {
+        return;
+    }
+
+    SipMethod objInviteMethod(SipMethod::INVITE);
+    TriggerPoint objInviteTp(objInviteMethod);
+    piSfc->AddTriggerPoint(objInviteTp);
+
+    SipMethod objOptionsMethod(SipMethod::OPTIONS);
+    TriggerPoint objOptionsTp(objOptionsMethod);
+    piSfc->AddTriggerPoint(objOptionsTp);
+}
+
+PRIVATE
+void MtcService::SetAosReady(IN IMS_BOOL bReady)
+{
+    if (m_pAosConnector == IMS_NULL)
+    {
+        return;
+    }
+
+    if (m_eType == ServiceType::NORMAL)
+    {
+        m_pAosConnector->SetReady(bReady, ImsAosService::MTC);
+    }
+    else
+    {
+        m_pAosConnector->SetReady(bReady, ImsAosService::EMERGENCY_MTC);
+    }
+}
+
+PRIVATE
+void MtcService::UpdateCallComposerFeature(IN IMS_UINT32 nFeatures)
+{
+    ICoreService* pCoreService = GetICoreService();
+    IFeatureCaps* pFeatureCapabilities =
+            pCoreService != IMS_NULL ? pCoreService->GetFeatureCaps() : IMS_NULL;
+    if (pFeatureCapabilities == IMS_NULL)
+    {
+        return;
+    }
+
+    if (nFeatures & ImsAosFeature::CALL_COMPOSER_VIA_TELEPHONY)
+    {
+        if (!m_bFeatureAddedForCallComposer)
+        {
+            pFeatureCapabilities->AddFeature(
+                    FEATURE_TAG_CALL_COMPOSER, AString::ConstEmpty(), SipMethod::INVITE);
+            m_bFeatureAddedForCallComposer = IMS_TRUE;
+        }
+    }
+    else
+    {
+        if (m_bFeatureAddedForCallComposer)
+        {
+            pFeatureCapabilities->RemoveFeature(
+                    FEATURE_TAG_CALL_COMPOSER, AString::ConstEmpty(), SipMethod::INVITE);
+            m_bFeatureAddedForCallComposer = IMS_FALSE;
+        }
+    }
+}

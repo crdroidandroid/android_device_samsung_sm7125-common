@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <int-array name="ims.ipsec_encryption_algorithms_int_array" num="1">
+        <item value="2" />
+    </int-array>
+    <string name="imsvoice.conference_factory_uri_string">conference-factory</string>
+</carrier_config>

@@ -1,0 +1,510 @@
+/*
+ * Copyright (C) 2022 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.imsstack.enabler.mts;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.Message;
+import android.os.Parcel;
+import android.util.Base64;
+
+import com.android.imsstack.core.agents.AgentFactory;
+import com.android.imsstack.core.agents.ConfigInterface;
+import com.android.imsstack.core.agents.TelephonyInterface;
+import com.android.imsstack.core.config.CarrierConfig;
+import com.android.imsstack.enabler.IBaseContext;
+import com.android.imsstack.enabler.mts.MtsJni;
+import com.android.imsstack.util.ImsLog;
+
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.JUnit4;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
+
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+@RunWith(JUnit4.class)
+public class MtsControllerTest {
+    private static final int SLOT_ID = 0;
+    private MtsController mMtsController;
+
+    @Mock CarrierConfig mMockCarrierConfig;
+    @Mock ConfigInterface mMockConfigInterface;
+    @Mock IBaseContext mMockIBaseContext;
+    @Mock TelephonyInterface mMockTelephonyInterface;
+    @Mock MtsController.Listener mMockMtsControllerListener = new MtsController.Listener();
+
+    // test configurations
+    private int mSmsFormat = 1;
+    private String mPsiSmsc = "sip:+12345678901@ims.google.com";
+    private String mDialedNumber = "tel:+12345678901";
+    private String mEncodedData = "Encoded SMS RP-DATA";
+    private byte[] mPduData = new byte[] {0, 10, 50, 15};
+    private int mSeqId = 1;
+
+    private TestMtsJni mMtsJni;
+
+    private class TestMtsJni extends MtsJni {
+        Parcel mLastParcel;
+        private boolean mIsReleased = false;
+
+        public TestMtsJni() {
+            super();
+        }
+
+        @Override
+        public void init(Handler handler, int slotId) {};
+
+        @Override
+        public void release(int slotId) {
+            mIsReleased = true;
+        };
+
+        @Override
+        public void sendMessage(Parcel parcel, int slotId) {
+            if (parcel == null) {
+                ImsLog.i("parcel is null");
+                return;
+            }
+
+            mLastParcel = parcel;
+        }
+
+        public boolean isReleased() {
+            return mIsReleased;
+        }
+    }
+
+    @Before
+    public void setUp() {
+        MockitoAnnotations.initMocks(this);
+
+        AgentFactory.getInstance().setAgent(
+                TelephonyInterface.class, mMockTelephonyInterface, SLOT_ID);
+        when(mMockConfigInterface.getCarrierConfig()).thenReturn(mMockCarrierConfig);
+        AgentFactory.getInstance().setAgent(ConfigInterface.class, mMockConfigInterface, SLOT_ID);
+
+        when(mMockIBaseContext.getSlotId()).thenReturn(SLOT_ID);
+        when(mMockIBaseContext.getCallLooper()).thenReturn(Looper.getMainLooper());
+
+        when(mMockCarrierConfig.getBoolean(
+                eq(CarrierConfig.ImsSms.KEY_SMS_USE_DIALED_NUMBER_FOR_REQUEST_URI_BOOL)))
+                .thenReturn(true);
+
+        mMtsController = new MtsController(mMockIBaseContext);
+        mMtsController.setListener(mMockMtsControllerListener);
+
+        mMtsJni = new TestMtsJni();
+        mMtsController.startNativeConnection(mMtsJni);
+    }
+
+    @After
+    public void tearDown() {
+        AgentFactory.getInstance().setAgent(ConfigInterface.class, null, SLOT_ID);
+        AgentFactory.getInstance().setAgent(TelephonyInterface.class, null, SLOT_ID);
+        if (mMtsJni.mLastParcel != null) {
+            mMtsJni.mLastParcel.recycle();
+            mMtsJni.mLastParcel = null;
+        }
+        mMtsController.cleanup();
+    }
+
+    @Test
+    public void testSendMessageCallBackSuccess() {
+        when(mMockTelephonyInterface.isEmergencyNumber(mDialedNumber)).thenReturn(false);
+        boolean result = mMtsController.sendMessage(
+                mSmsFormat, mPduData, mPsiSmsc, mDialedNumber, mSeqId);
+
+        Bundle bundle = new Bundle();
+        bundle.putInt(MtsController.REPORTMOSTATUS_REASON, MtsController.MO_SUCCESS);
+        bundle.putInt(MtsController.REPORTMOSTATUS_SMSFORMAT, 1);
+        bundle.putInt(MtsController.REPORTMOSTATUS_SEQID, 1);
+
+        Message msg = Message.obtain();
+        msg.what = MtsController.REQUEST_REPORT_MO_STATUS;
+        msg.obj = bundle;
+
+        Handler handler = mMtsController.getHandler();
+        handler.sendMessage(msg);
+
+        waitForHandlerActionDelayed(handler, 1000, 0);
+
+        // reason, smsFormat, seqid
+        verify(mMockMtsControllerListener).notifyStatusForOutgoingMessage(
+                eq(MtsController.MO_SUCCESS), eq(mSmsFormat), eq(mSeqId));
+        assertEquals(result, true);
+    }
+
+    @Test
+    public void testSendMessageWithEmergencyNumber() {
+        when(mMockTelephonyInterface.isEmergencyNumber(mDialedNumber)).thenReturn(true);
+        boolean result = mMtsController.sendMessage(
+                mSmsFormat, mPduData, mPsiSmsc, mDialedNumber, mSeqId);
+
+        Bundle bundle = new Bundle();
+        bundle.putInt(MtsController.REPORTMOSTATUS_REASON, MtsController.MO_SUCCESS);
+        bundle.putInt(MtsController.REPORTMOSTATUS_SMSFORMAT, 1);
+        bundle.putInt(MtsController.REPORTMOSTATUS_SEQID, 1);
+
+        Message msg = Message.obtain();
+        msg.what = MtsController.REQUEST_REPORT_MO_STATUS;
+        msg.obj = bundle;
+
+        Handler handler = mMtsController.getHandler();
+        handler.sendMessage(msg);
+
+        waitForHandlerActionDelayed(handler, 1000, 0);
+
+        // reason, smsFormat, retryafter, seqid
+        verify(mMockMtsControllerListener).notifyStatusForOutgoingMessage(
+                eq(MtsController.MO_SUCCESS), eq(mSmsFormat), eq(mSeqId));
+        assertEquals(result, true);
+    }
+
+    @Test
+    public void testSendMessageCallBackErrorRetry() {
+        when(mMockTelephonyInterface.isEmergencyNumber(mDialedNumber)).thenReturn(false);
+
+        boolean result = mMtsController.sendMessage(
+                mSmsFormat, mPduData, mPsiSmsc, mDialedNumber, mSeqId);
+
+        Bundle bundle = new Bundle();
+        bundle.putInt(MtsController.REPORTMOSTATUS_REASON, MtsController.MO_ERROR_RETRY);
+        bundle.putInt(MtsController.REPORTMOSTATUS_SMSFORMAT, 1);
+        bundle.putInt(MtsController.REPORTMOSTATUS_SEQID, 1);
+
+        Message msg = Message.obtain();
+        msg.what = MtsController.REQUEST_REPORT_MO_STATUS;
+        msg.obj = bundle;
+
+        Handler handler = mMtsController.getHandler();
+        handler.sendMessage(msg);
+
+        waitForHandlerActionDelayed(handler, 1000, 0);
+
+        // reason, smsFormat, retryafter, seqid
+        verify(mMockMtsControllerListener).notifyStatusForOutgoingMessage(
+                eq(MtsController.MO_ERROR_RETRY), eq(mSmsFormat), eq(mSeqId));
+        assertEquals(result, true);
+    }
+
+    @Test
+    public void testReceiveMessage() {
+        Message msg = Message.obtain();
+        msg.what = MtsController.REQUEST_REPORT_MT_SMS;
+        msg.arg1 = mSmsFormat;
+        msg.obj = mEncodedData;
+        mEncodedData = mEncodedData.replaceAll("\\s", "");
+        byte[] pduData = Base64.decode(mEncodedData, Base64.NO_PADDING);
+
+        Handler handler = mMtsController.getHandler();
+        handler.sendMessage(msg);
+
+        waitForHandlerActionDelayed(handler, 1000, 0);
+
+        verify(mMockMtsControllerListener).notifyIncomingMessage(
+                eq(mSmsFormat), eq(pduData));
+    }
+
+    @Test
+    public void testNotifyMoSmsTimedOut() {
+        mMtsController.notifyMoSmsTimedOut();
+
+        assertNotNull(mMtsJni.mLastParcel);
+
+        mMtsJni.mLastParcel.setDataPosition(0);
+        int event = mMtsJni.mLastParcel.readInt();
+        assertEquals(MtsJni.NOTI_MTSENABLER_MO_SMS_TIMED_OUT, event);
+    }
+
+    @Test
+    public void testNotifyMtSmsTimedOut() {
+        int messageRef = 1;
+        mMtsController.notifyMtSmsTimedOut(messageRef);
+
+        assertNotNull(mMtsJni.mLastParcel);
+
+        mMtsJni.mLastParcel.setDataPosition(0);
+        int event = mMtsJni.mLastParcel.readInt();
+        assertEquals(MtsJni.NOTI_MTSENABLER_MT_SMS_TIMED_OUT, event);
+        int ref = mMtsJni.mLastParcel.readInt();
+        assertEquals(messageRef, ref);
+    }
+
+    @Test
+    public void testSendMessageWithNullSmsc() {
+        boolean result = mMtsController.sendMessage(
+                mSmsFormat, mPduData, null, mDialedNumber, mSeqId);
+
+        assertEquals(false, result);
+
+        waitForHandlerActionDelayed(mMtsController.getHandler(), 1000, 0);
+
+        // Verify that MO_ERROR_RETRY is sent back
+        verify(mMockMtsControllerListener).notifyStatusForOutgoingMessage(
+                eq(MtsController.MO_ERROR_RETRY), eq(mSmsFormat), eq(mSeqId));
+    }
+
+    @Test
+    public void testSendMessageWithNullDialedNumberAndUseDialedNumberTrue() {
+        boolean result = mMtsController.sendMessage(
+                mSmsFormat, mPduData, mPsiSmsc, null, mSeqId);
+
+        assertEquals(false, result);
+
+        waitForHandlerActionDelayed(mMtsController.getHandler(), 1000, 0);
+
+        // Verify that MO_ERROR_RETRY is sent back
+        verify(mMockMtsControllerListener).notifyStatusForOutgoingMessage(
+                eq(MtsController.MO_ERROR_RETRY), eq(mSmsFormat), eq(mSeqId));
+    }
+
+    @Test
+    public void testSendMessageWithUseDialedNumberFalse() {
+        when(mMockCarrierConfig.getBoolean(
+                eq(CarrierConfig.ImsSms.KEY_SMS_USE_DIALED_NUMBER_FOR_REQUEST_URI_BOOL)))
+                .thenReturn(false);
+
+        MtsController mtsController = new MtsController(mMockIBaseContext);
+        mtsController.setListener(mMockMtsControllerListener);
+        TestMtsJni mtsJni = new TestMtsJni();
+        mtsController.startNativeConnection(mtsJni);
+
+        when(mMockTelephonyInterface.isEmergencyNumber(mDialedNumber)).thenReturn(false);
+        boolean result = mtsController.sendMessage(
+                mSmsFormat, mPduData, mPsiSmsc, mDialedNumber, mSeqId);
+
+        assertEquals(true, result);
+
+        assertNotNull(mtsJni.mLastParcel);
+        mtsJni.mLastParcel.setDataPosition(0);
+        assertEquals(MtsJni.NOTI_MTSENABLER_SEND_MO_SMS, mtsJni.mLastParcel.readInt());
+        assertEquals(mSmsFormat, mtsJni.mLastParcel.readInt());
+        mtsJni.mLastParcel.readString(); // skip encoded PDU
+        assertEquals(mPsiSmsc, mtsJni.mLastParcel.readString()); // targetAddress
+
+        mtsController.cleanup();
+    }
+
+    @Test
+    public void testSendMessageWithRetry() {
+        when(mMockTelephonyInterface.isEmergencyNumber(mDialedNumber)).thenReturn(false);
+        boolean result = mMtsController.sendMessage(
+                mSmsFormat, mPduData, mPsiSmsc, mDialedNumber, mSeqId, true);
+
+        assertEquals(true, result);
+
+        assertNotNull(mMtsJni.mLastParcel);
+        mMtsJni.mLastParcel.setDataPosition(0);
+        mMtsJni.mLastParcel.readInt(); // event
+        mMtsJni.mLastParcel.readInt(); // smsFormat
+        mMtsJni.mLastParcel.readString(); // encodedPdu
+        mMtsJni.mLastParcel.readString(); // targetAddress
+        mMtsJni.mLastParcel.readInt(); // seqId
+        mMtsJni.mLastParcel.readBoolean(); // isEmergency
+        int retryCount = mMtsJni.mLastParcel.readInt();
+        assertEquals(1, retryCount);
+
+        // call again to see retryCount increment
+        mMtsController.sendMessage(
+                mSmsFormat, mPduData, mPsiSmsc, mDialedNumber, mSeqId, true);
+
+        mMtsJni.mLastParcel.setDataPosition(0);
+        mMtsJni.mLastParcel.readInt(); // event
+        mMtsJni.mLastParcel.readInt(); // smsFormat
+        mMtsJni.mLastParcel.readString(); // encodedPdu
+        mMtsJni.mLastParcel.readString(); // targetAddress
+        mMtsJni.mLastParcel.readInt(); // seqId
+        mMtsJni.mLastParcel.readBoolean(); // isEmergency
+        retryCount = mMtsJni.mLastParcel.readInt();
+        assertEquals(2, retryCount);
+
+        // call without retry to see it reset
+        mMtsController.sendMessage(
+                mSmsFormat, mPduData, mPsiSmsc, mDialedNumber, mSeqId, false);
+
+        mMtsJni.mLastParcel.setDataPosition(0);
+        mMtsJni.mLastParcel.readInt(); // event
+        mMtsJni.mLastParcel.readInt(); // smsFormat
+        mMtsJni.mLastParcel.readString(); // encodedPdu
+        mMtsJni.mLastParcel.readString(); // targetAddress
+        mMtsJni.mLastParcel.readInt(); // seqId
+        mMtsJni.mLastParcel.readBoolean(); // isEmergency
+        retryCount = mMtsJni.mLastParcel.readInt();
+        assertEquals(0, retryCount);
+    }
+
+    @Test
+    public void testDeprecatedSendMessageResetsRetryCount() {
+        // First set a retry
+        mMtsController.sendMessage(
+                mSmsFormat, mPduData, mPsiSmsc, mDialedNumber, mSeqId, true);
+        mMtsJni.mLastParcel.setDataPosition(0);
+        mMtsJni.mLastParcel.readInt();
+        mMtsJni.mLastParcel.readInt();
+        mMtsJni.mLastParcel.readString();
+        mMtsJni.mLastParcel.readString();
+        mMtsJni.mLastParcel.readInt();
+        mMtsJni.mLastParcel.readBoolean();
+        assertEquals(1, mMtsJni.mLastParcel.readInt());
+
+        // Now call deprecated method
+        mMtsController.sendMessage(
+                mSmsFormat, mPduData, mPsiSmsc, mDialedNumber, mSeqId);
+        mMtsJni.mLastParcel.setDataPosition(0);
+        mMtsJni.mLastParcel.readInt();
+        mMtsJni.mLastParcel.readInt();
+        mMtsJni.mLastParcel.readString();
+        mMtsJni.mLastParcel.readString();
+        mMtsJni.mLastParcel.readInt();
+        mMtsJni.mLastParcel.readBoolean();
+        assertEquals(0, mMtsJni.mLastParcel.readInt());
+    }
+
+    @Test
+    public void testConstructorWithNullConfigInterface() {
+        AgentFactory.getInstance().setAgent(ConfigInterface.class, null, SLOT_ID);
+        MtsController mtsController = new MtsController(mMockIBaseContext);
+        assertNotNull(mtsController);
+        mtsController.cleanup();
+    }
+
+    @Test
+    public void testConstructorWithNullCarrierConfig() {
+        when(mMockConfigInterface.getCarrierConfig()).thenReturn(null);
+        MtsController mtsController = new MtsController(mMockIBaseContext);
+        assertNotNull(mtsController);
+        mtsController.cleanup();
+    }
+
+    @Test
+    public void testHandleMessageWithNullListener() {
+        mMtsController.setListener(null);
+        Bundle bundle = new Bundle();
+        bundle.putInt(MtsController.REPORTMOSTATUS_REASON, MtsController.MO_SUCCESS);
+        bundle.putInt(MtsController.REPORTMOSTATUS_SMSFORMAT, 1);
+        bundle.putInt(MtsController.REPORTMOSTATUS_SEQID, 1);
+        Message msg = Message.obtain();
+        msg.what = MtsController.REQUEST_REPORT_MO_STATUS;
+        msg.obj = bundle;
+        Handler handler = mMtsController.getHandler();
+
+        // Should not crash.
+        handler.sendMessage(msg);
+
+        waitForHandlerActionDelayed(handler, 1000, 0);
+    }
+
+    @Test
+    public void testCleanup() {
+        assertNotNull(mMtsController.getHandler());
+        assertEquals(false, mMtsJni.isReleased());
+
+        mMtsController.cleanup();
+
+        // Handler should be cleared and JNI released.
+        assertEquals(true, mMtsJni.isReleased());
+
+        // Call cleanup again, should not crash
+        mMtsController.cleanup();
+    }
+
+    @Test
+    public void testSendMessageWithNullSmsData() {
+        boolean result = mMtsController.sendMessage(
+                mSmsFormat, null, mPsiSmsc, mDialedNumber, mSeqId);
+
+        assertEquals(false, result);
+
+        waitForHandlerActionDelayed(mMtsController.getHandler(), 1000, 0);
+
+        // Verify that MO_ERROR_RETRY is sent back
+        verify(mMockMtsControllerListener).notifyStatusForOutgoingMessage(
+                eq(MtsController.MO_ERROR_GENERIC), eq(mSmsFormat), eq(mSeqId));
+    }
+
+    @Test
+    public void testSendMessageWithNullTelephonyInterface() {
+        AgentFactory.getInstance().setAgent(TelephonyInterface.class, null, SLOT_ID);
+
+        boolean result = mMtsController.sendMessage(
+                mSmsFormat, mPduData, mPsiSmsc, mDialedNumber, mSeqId);
+        assertEquals(true, result);
+
+        assertNotNull(mMtsJni.mLastParcel);
+        mMtsJni.mLastParcel.setDataPosition(0);
+        mMtsJni.mLastParcel.readInt(); // event
+        mMtsJni.mLastParcel.readInt(); // smsFormat
+        mMtsJni.mLastParcel.readString(); // encodedPdu
+        mMtsJni.mLastParcel.readString(); // targetAddress
+        mMtsJni.mLastParcel.readInt(); // seqId
+        boolean isEmergency = mMtsJni.mLastParcel.readBoolean();
+        assertEquals(false, isEmergency);
+    }
+
+    @Test
+    public void testProcessNotifySendMoSmsErrorWithNullHandler() {
+        mMtsController.cleanup();
+        // This will call processNotifySendMoSmsError, should not crash with null handler.
+        boolean result = mMtsController.sendMessage(
+                mSmsFormat, mPduData, null, mDialedNumber, mSeqId);
+        assertEquals(false, result);
+    }
+
+    @Test
+    public void testHandleMessageDefaultCase() {
+        Message msg = Message.obtain();
+        msg.what = 999; // some other message
+
+        Handler handler = mMtsController.getHandler();
+        handler.sendMessage(msg);
+
+        waitForHandlerActionDelayed(handler, 1000, 0);
+
+        // No listener methods should be called.
+        verify(mMockMtsControllerListener, never()).notifyStatusForOutgoingMessage(
+                anyInt(), anyInt(), anyInt());
+        verify(mMockMtsControllerListener, never()).notifyIncomingMessage(
+                anyInt(), any(byte[].class));
+    }
+
+    private void waitForHandlerActionDelayed(Handler handler, long timeoutMillis, long delayMs) {
+        final CountDownLatch lock = new CountDownLatch(1);
+        handler.postDelayed(lock::countDown, delayMs);
+        while (lock.getCount() > 0) {
+            try {
+                lock.await(timeoutMillis, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException e) {
+                // do nothing
+            }
+        }
+    }
+}

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <string name="ims.ims_user_agent_string">#MANUFACTURE#_#MODEL#_#BUILD#</string>
+    <int-array name="imsss.ut_server_based_services_int_array" num="21">
+        <item value="20" />
+        <item value="12" />
+        <item value="18" />
+        <item value="14" />
+        <item value="19" />
+        <item value="21" />
+        <item value="15" />
+        <item value="16" />
+        <item value="17" />
+        <item value="13" />
+        <item value="1" />
+        <item value="3" />
+        <item value="4" />
+        <item value="7" />
+        <item value="6" />
+        <item value="5" />
+        <item value="2" />
+        <item value="0" />
+        <item value="8" />
+        <item value="9" />
+        <item value="11" />
+    </int-array>
+    <int-array name="imsss.ut_terminal_based_services_int_array" num="1">
+        <item value="10" />
+    </int-array>
+    <boolean name="imsvoice.prack_supported_for_18x_bool" value="true" />
+    <int name="imsvoice.ringback_timer_millis_int" value="60000" />
+    <int name="imsvoice.ringing_timer_millis_int" value="60000" />
+</carrier_config>

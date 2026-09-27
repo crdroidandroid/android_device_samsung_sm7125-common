@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <int name="ims.ipv4_sip_mtu_size_cellular_int" value="1430" />
+    <int name="ims.ipv6_sip_mtu_size_cellular_int" value="1430" />
+    <int name="ims.registration_retry_max_timer_millis_int" value="300000" />
+    <int name="ims.sip_timer_b_millis_int" value="32000" />
+    <int name="ims.sip_timer_f_millis_int" value="32000" />
+    <pbundle_as_map name="imsvoice.audio_codec_capability_payload_types_bundle">
+        <int-array name="imsvoice.amrnb_payload_type_int_array" num="1">
+            <item value="110" />
+        </int-array>
+        <int-array name="imsvoice.amrwb_payload_type_int_array" num="1">
+            <item value="104" />
+        </int-array>
+        <int-array name="imsvoice.dtmfnb_payload_type_int_array" num="1">
+            <item value="97" />
+        </int-array>
+        <int-array name="imsvoice.dtmfwb_payload_type_int_array" num="1">
+            <item value="96" />
+        </int-array>
+    </pbundle_as_map>
+    <string name="imsvoice.conference_factory_uri_string">n-way_voice@ims.mnc340.mcc313.3gppnetwork.org</string>
+    <boolean name="imsvoice.include_caller_id_service_codes_in_sip_invite_bool" value="true" />
+    <int name="imsvoice.mo_call_request_timeout_millis_int" value="0" />
+    <int name="imsvoice.ringback_timer_millis_int" value="90000" />
+    <int name="imsvoice.ringing_timer_millis_int" value="90000" />
+    <boolean name="imsvoice.session_timer_supported_bool" value="false" />
+</carrier_config>

@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <int name="ims.ipv4_sip_mtu_size_cellular_int" value="1428" />
+    <int name="ims.ipv6_sip_mtu_size_cellular_int" value="1428" />
+    <int name="ims.request_uri_type_int" value="1" />
+    <boolean name="ims.sip_over_ipsec_enabled_bool" value="false" />
+    <string name="imsss.ut_as_server_fqdn_string">xcap.ims.cellcom.com</string>
+    <boolean name="imsss.ut_requires_ims_registration_bool" value="true" />
+    <pbundle_as_map name="imsvoice.amrnb_payload_description_bundle">
+        <pbundle_as_map name="102">
+            <int-array name="imsvoice.amr_codec_attribute_modeset_int_array" num="1">
+                <item value="7" />
+            </int-array>
+            <int name="imsvoice.codec_attribute_mode_change_capability_int" value="1" />
+        </pbundle_as_map>
+        <pbundle_as_map name="106">
+            <int name="imsvoice.amr_codec_attribute_payload_format_int" value="0" />
+            <int name="imsvoice.codec_attribute_mode_change_capability_int" value="1" />
+        </pbundle_as_map>
+        <pbundle_as_map name="108">
+            <int-array name="imsvoice.amr_codec_attribute_modeset_int_array" num="1">
+                <item value="7" />
+            </int-array>
+            <int name="imsvoice.amr_codec_attribute_payload_format_int" value="1" />
+            <int name="imsvoice.codec_attribute_mode_change_capability_int" value="1" />
+        </pbundle_as_map>
+    </pbundle_as_map>
+    <pbundle_as_map name="imsvoice.amrwb_payload_description_bundle">
+        <pbundle_as_map name="104">
+            <int-array name="imsvoice.amr_codec_attribute_modeset_int_array" num="1">
+                <item value="2" />
+            </int-array>
+            <int name="imsvoice.codec_attribute_mode_change_capability_int" value="1" />
+        </pbundle_as_map>
+        <pbundle_as_map name="110">
+            <int-array name="imsvoice.amr_codec_attribute_modeset_int_array" num="1">
+                <item value="2" />
+            </int-array>
+            <int name="imsvoice.amr_codec_attribute_payload_format_int" value="1" />
+            <int name="imsvoice.codec_attribute_mode_change_capability_int" value="1" />
+        </pbundle_as_map>
+    </pbundle_as_map>
+    <int name="imsvoice.audio_as_bandwidth_kbps_int" value="38" />
+    <pbundle_as_map name="imsvoice.audio_codec_capability_payload_types_bundle">
+        <int-array name="imsvoice.amrnb_payload_type_int_array" num="3">
+            <item value="102" />
+            <item value="108" />
+            <item value="106" />
+        </int-array>
+        <int-array name="imsvoice.amrwb_payload_type_int_array" num="2">
+            <item value="104" />
+            <item value="110" />
+        </int-array>
+        <int-array name="imsvoice.dtmfnb_payload_type_int_array" num="1">
+            <item value="100" />
+        </int-array>
+        <int-array name="imsvoice.dtmfwb_payload_type_int_array" num="1">
+            <item value="105" />
+        </int-array>
+    </pbundle_as_map>
+    <int name="imsvoice.audio_rr_bandwidth_bps_int" value="2400" />
+    <int name="imsvoice.audio_rs_bandwidth_bps_int" value="800" />
+    <string name="imsvoice.conference_factory_uri_string">confserver@ims.cellcom.com</string>
+    <int name="imsvoice.conference_subscribe_type_int" value="0" />
+    <boolean name="imsvoice.include_caller_id_service_codes_in_sip_invite_bool" value="true" />
+    <int name="imsvoice.minimum_session_expires_timer_sec_int" value="900" />
+    <int name="imsvoice.ringback_timer_millis_int" value="60000" />
+    <int name="imsvoice.ringing_timer_millis_int" value="60000" />
+</carrier_config>

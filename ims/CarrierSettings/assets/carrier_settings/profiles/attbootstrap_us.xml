@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <int name="ims.ipv4_sip_mtu_size_cellular_int" value="1430" />
+    <int name="ims.ipv6_sip_mtu_size_cellular_int" value="1430" />
+    <int name="ims.registration_retry_base_timer_millis_int" value="120000" />
+    <int name="ims.registration_retry_max_timer_millis_int" value="7200000" />
+    <int name="ims.request_uri_type_int" value="1" />
+    <int name="ims.sip_timer_b_millis_int" value="32000" />
+    <int name="ims.sip_timer_d_millis_int" value="32000" />
+    <int name="ims.sip_timer_f_millis_int" value="32000" />
+    <int name="ims.sip_timer_h_millis_int" value="32000" />
+    <int name="ims.sip_timer_j_millis_int" value="32000" />
+    <boolean name="imssms.sms_csfb_retry_on_failure_bool" value="false" />
+    <int-array name="imsss.ut_server_based_services_int_array" num="21">
+        <item value="20" />
+        <item value="12" />
+        <item value="18" />
+        <item value="14" />
+        <item value="19" />
+        <item value="21" />
+        <item value="15" />
+        <item value="16" />
+        <item value="17" />
+        <item value="13" />
+        <item value="1" />
+        <item value="3" />
+        <item value="4" />
+        <item value="7" />
+        <item value="6" />
+        <item value="5" />
+        <item value="2" />
+        <item value="0" />
+        <item value="8" />
+        <item value="9" />
+        <item value="11" />
+    </int-array>
+    <int-array name="imsss.ut_terminal_based_services_int_array" num="1">
+        <item value="10" />
+    </int-array>
+    <int name="imsvoice.audio_as_bandwidth_kbps_int" value="49" />
+    <pbundle_as_map name="imsvoice.audio_codec_capability_payload_types_bundle">
+        <int-array name="imsvoice.amrnb_payload_type_int_array" num="1">
+            <item value="110" />
+        </int-array>
+        <int-array name="imsvoice.amrwb_payload_type_int_array" num="1">
+            <item value="104" />
+        </int-array>
+        <int-array name="imsvoice.dtmfnb_payload_type_int_array" num="1">
+            <item value="97" />
+        </int-array>
+        <int-array name="imsvoice.dtmfwb_payload_type_int_array" num="1">
+            <item value="96" />
+        </int-array>
+    </pbundle_as_map>
+    <boolean name="imsvoice.include_caller_id_service_codes_in_sip_invite_bool" value="true" />
+    <int name="imsvoice.mo_call_request_timeout_millis_int" value="0" />
+    <int name="imsvoice.ringback_timer_millis_int" value="180000" />
+    <int name="imsvoice.ringing_timer_millis_int" value="45000" />
+    <boolean name="imsvoice.session_timer_supported_bool" value="false" />
+</carrier_config>

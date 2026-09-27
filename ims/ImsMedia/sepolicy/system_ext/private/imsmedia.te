@@ -1,0 +1,6 @@
+# ImsStack creates the RTP and RTCP sockets in the platform_app domain, then
+# passes them to the phone-UID ImsMediaService in the radio domain over Binder.
+allow radio platform_app:udp_socket { getattr read write setopt shutdown };
+
+# ImsMedia requests real-time priority for its socket and audio worker threads.
+allow radio scheduling_policy_service:service_manager find;

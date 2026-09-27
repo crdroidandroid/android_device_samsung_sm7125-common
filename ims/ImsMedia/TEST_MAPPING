@@ -1,0 +1,31 @@
+{
+    // For presubmit test group.
+    "presubmit": [
+        {
+            "name": "ImsMediaNativeTests_sm7125"
+        },
+        {
+            "name": "ImsMediaJavaUnitTests_sm7125"
+        }
+    ],
+
+    // For postsubmit test group.
+    "postsubmit": [
+        {
+            "name": "ImsMediaNativeTests_sm7125"
+        },
+        {
+            "name": "ImsMediaJavaUnitTests_sm7125"
+        }
+    ],
+
+    // For ImsMedia test group.
+    "ImsMedia-alltests": [
+        {
+            "name": "ImsMediaNativeTests_sm7125"
+        },
+        {
+            "name": "ImsMediaJavaUnitTests_sm7125"
+        }
+    ]
+}

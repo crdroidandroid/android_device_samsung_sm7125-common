@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <string name="imsss.ut_as_server_fqdn_string">xcap.ims.mnc003.mcc268.pub.3gppnetwork.org</string>
+    <int name="imsss.ut_as_server_port_int" value="8080" />
+    <boolean name="imsss.ut_requires_ims_registration_bool" value="true" />
+</carrier_config>

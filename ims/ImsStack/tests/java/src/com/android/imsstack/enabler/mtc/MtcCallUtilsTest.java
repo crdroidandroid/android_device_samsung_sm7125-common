@@ -1,0 +1,450 @@
+/*
+ * Copyright (C) 2023 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.imsstack.enabler.mtc;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
+import com.android.imsstack.enabler.mtc.conf.UsersInfo;
+
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.JUnit4;
+import org.mockito.Mockito;
+
+@RunWith(JUnit4.class)
+public class MtcCallUtilsTest {
+    @Test
+    public void addUser_withTargetOnly_addsUserWithCorrectDefaults() {
+        // Verifies addUser with 3 parameters.
+        UsersInfo userInfo = new UsersInfo();
+        final long callId = 100;
+        final String target = "sip:test@example.com";
+
+        MtcCallUtils.addUser(userInfo, callId, target);
+
+        assertEquals(1, userInfo.Users.size());
+        UsersInfo.User user = userInfo.getUser(0);
+        assertEquals(callId, user.callID);
+        assertEquals(target, user.target);
+        assertEquals("", user.userEntity);
+        assertEquals("", user.epEntity);
+        assertEquals(UsersInfo.USER_STATUS_IDLE, user.status);
+    }
+
+    @Test
+    public void addUser_withNullUsersInfo_doesNotCrash() {
+        // Verifies that addUser does not crash with null UsersInfo.
+        MtcCallUtils.addUser(null, 100, "target");
+        MtcCallUtils.addUser(null, 100, "target", "user", "endpoint");
+    }
+
+    @Test
+    public void addUser_withEntityInfo_addsUserWithCorrectDetails() {
+        UsersInfo userInfo = new UsersInfo();
+        final long callId = 100;
+        final String target = "sip:test@example.com";
+        final String userEntity = "userEntity";
+        final String endpointEntity = "endpointEntity";
+
+        // Verifies addUser with 5 parameters.
+        MtcCallUtils.addUser(userInfo, callId, target, userEntity, endpointEntity);
+
+        assertEquals(1, userInfo.Users.size());
+        UsersInfo.User user = userInfo.getUser(0);
+        assertEquals(callId, user.callID);
+        assertEquals(target, user.target);
+        assertEquals(userEntity, user.userEntity);
+        assertEquals(endpointEntity, user.epEntity);
+        assertEquals(UsersInfo.USER_STATUS_IDLE, user.status);
+    }
+
+    @Test
+    public void copyMediaInfo_copiesAllFieldsCorrectly() {
+        MediaInfo src = new MediaInfo();
+        src.audioQuality = MediaInfo.AUDIO_QUALITY_AMR_WB;
+        src.videoQuality = MediaInfo.VIDEO_QUALITY_QCIF;
+        src.audioDir = MediaInfo.DIRECTION_SEND;
+        src.videoDir = MediaInfo.DIRECTION_RECEIVE;
+        src.textDir = MediaInfo.DIRECTION_SEND_RECEIVE;
+        src.gttMode = MediaInfo.GTTMODE_FULL;
+
+        MediaInfo dest = new MediaInfo();
+        MtcCallUtils.copyMediaInfo(src, dest);
+
+        // Verifies all fields are copied correctly for a standard case.
+        assertEquals(src.audioQuality, dest.audioQuality);
+        assertEquals(src.videoQuality, dest.videoQuality);
+        assertEquals(src.audioDir, dest.audioDir);
+        assertEquals(src.videoDir, dest.videoDir);
+        assertEquals(src.textDir, dest.textDir);
+        assertEquals(src.gttMode, dest.gttMode);
+    }
+
+    @Test
+    public void copyMediaInfo_whenVideoQualityIsNone_setsVideoDirectionToInvalid() {
+        MediaInfo src = new MediaInfo();
+        src.videoQuality = MediaInfo.VIDEO_QUALITY_NONE;
+        src.videoDir = MediaInfo.DIRECTION_SEND_RECEIVE;
+
+        MediaInfo dest = new MediaInfo();
+        MtcCallUtils.copyMediaInfo(src, dest);
+
+        assertEquals(src.videoQuality, dest.videoQuality);
+        assertEquals(MediaInfo.DIRECTION_INVALID, dest.videoDir);
+    }
+
+    @Test
+    public void copyMediaInfo_whenVideoQualityIsNotUsed_setsVideoDirectionToInvalid() {
+        MediaInfo src = new MediaInfo();
+        src.videoQuality = MediaInfo.VIDEO_QUALITY_NOTUSED;
+        src.videoDir = MediaInfo.DIRECTION_SEND_RECEIVE;
+
+        MediaInfo dest = new MediaInfo();
+        MtcCallUtils.copyMediaInfo(src, dest);
+
+        assertEquals(src.videoQuality, dest.videoQuality);
+        assertEquals(MediaInfo.DIRECTION_INVALID, dest.videoDir);
+    }
+
+    @Test
+    public void createUsersInfo_withMultipleParticipants_createsCorrectUsersInfo() {
+        String[] participants = new String[]{"participant1", "participant2"};
+        UsersInfo usersInfo = MtcCallUtils.createUsersInfo(participants);
+
+        assertEquals(2, usersInfo.Users.size());
+        assertEquals("participant1", usersInfo.getUser(0).target);
+        assertEquals(0L, usersInfo.getUser(0).callID);
+        assertEquals(UsersInfo.USER_STATUS_IDLE, usersInfo.getUser(0).status);
+        assertEquals("participant2", usersInfo.getUser(1).target);
+        assertEquals(0L, usersInfo.getUser(1).callID);
+        assertEquals(UsersInfo.USER_STATUS_IDLE, usersInfo.getUser(1).status);
+    }
+
+    @Test
+    public void createUsersInfo_withEmptyParticipants_createsEmptyUsersInfo() {
+        String[] participants = new String[]{};
+        UsersInfo usersInfo = MtcCallUtils.createUsersInfo(participants);
+        assertEquals(0, usersInfo.Users.size());
+    }
+
+    @Test
+    public void testCreateHoldMedia() {
+        CallInfo callInfo = new CallInfo();
+        callInfo.callType = IUMtcCall.CALLTYPE_VIDEO_RTT;
+        callInfo.isConf = true;
+        MediaInfo mediaInfo = new MediaInfo();
+        mediaInfo.audioDir = MediaInfo.DIRECTION_RECEIVE;
+        mediaInfo.textDir = MediaInfo.DIRECTION_SEND;
+
+        MediaInfo createdMediaInfo = MtcCallUtils.createHoldMedia(callInfo, mediaInfo, true, true);
+
+        assertEquals(MediaInfo.DIRECTION_INACTIVE, createdMediaInfo.audioDir);
+        assertEquals(MediaInfo.DIRECTION_INACTIVE, createdMediaInfo.videoDir);
+        assertEquals(MediaInfo.DIRECTION_INVALID, createdMediaInfo.textDir);
+        assertEquals(MediaInfo.DIRECTION_INVALID, createdMediaInfo.gttMode);
+
+        mediaInfo.videoDir = MediaInfo.DIRECTION_SEND_RECEIVE;
+        callInfo.isConf = false;
+        mediaInfo.gttMode = MediaInfo.GTTMODE_VCO;
+
+        createdMediaInfo = MtcCallUtils.createHoldMedia(callInfo, mediaInfo, false, true);
+
+        assertEquals(MediaInfo.DIRECTION_SEND, createdMediaInfo.videoDir);
+        assertEquals(MediaInfo.DIRECTION_INACTIVE, createdMediaInfo.textDir);
+
+        createdMediaInfo = MtcCallUtils.createHoldMedia(callInfo, mediaInfo, false, false);
+
+        assertEquals(MediaInfo.DIRECTION_SEND, createdMediaInfo.textDir);
+    }
+
+    @Test
+    public void testCreateUnholdMedia() {
+        CallInfo callInfo = new CallInfo();
+        callInfo.callType = IUMtcCall.CALLTYPE_VIDEO_RTT;
+        callInfo.isConf = true;
+        MediaInfo mediaInfo = new MediaInfo();
+        mediaInfo.audioDir = MediaInfo.DIRECTION_INACTIVE;
+        mediaInfo.textDir = MediaInfo.DIRECTION_SEND;
+
+        MediaInfo createdMediaInfo = MtcCallUtils.createUnholdMedia(callInfo, mediaInfo, true);
+
+        assertEquals(MediaInfo.DIRECTION_RECEIVE, createdMediaInfo.audioDir);
+        assertEquals(MediaInfo.DIRECTION_SEND_RECEIVE, createdMediaInfo.videoDir);
+        assertEquals(MediaInfo.DIRECTION_INVALID, createdMediaInfo.textDir);
+        assertEquals(MediaInfo.DIRECTION_INVALID, createdMediaInfo.gttMode);
+
+        mediaInfo.videoDir = MediaInfo.DIRECTION_INACTIVE;
+        callInfo.isConf = false;
+        mediaInfo.gttMode = MediaInfo.GTTMODE_VCO;
+
+        createdMediaInfo = MtcCallUtils.createUnholdMedia(callInfo, mediaInfo, false);
+
+        assertEquals(MediaInfo.DIRECTION_RECEIVE, createdMediaInfo.videoDir);
+        assertEquals(MediaInfo.DIRECTION_SEND_RECEIVE, createdMediaInfo.textDir);
+    }
+
+    @Test
+    public void testGetSIPStatusCodeFromUserStatusCode() {
+        assertEquals(603, MtcCallUtils.getSIPStatusCodeFromUserStatusCode(
+                UsersInfo.USER_STATUS_REJECT));
+        assertEquals(1000, MtcCallUtils.getSIPStatusCodeFromUserStatusCode(1000));
+    }
+
+    @Test
+    public void testHasVideoQuality() {
+        MediaInfo mediaInfo = new MediaInfo();
+
+        assertFalse(MtcCallUtils.hasVideoQuality(mediaInfo));
+
+        mediaInfo.videoQuality = MediaInfo.VIDEO_QUALITY_QCIF;
+
+        assertTrue(MtcCallUtils.hasVideoQuality(mediaInfo));
+    }
+
+    @Test
+    public void testIs1WayVideo() {
+        MediaInfo mediaInfo = new MediaInfo();
+
+        assertFalse(MtcCallUtils.is1WayVideo(mediaInfo));
+
+        mediaInfo.audioDir = MediaInfo.DIRECTION_SEND_RECEIVE;
+        mediaInfo.videoDir  = MediaInfo.DIRECTION_SEND;
+
+        assertTrue(MtcCallUtils.is1WayVideo(mediaInfo));
+    }
+
+    @Test
+    public void testIs1WayVideoByRemoteEnd() {
+        MediaInfo mediaInfo = new MediaInfo();
+
+        assertFalse(MtcCallUtils.is1WayVideoByRemoteEnd(mediaInfo));
+
+        mediaInfo.audioDir = MediaInfo.DIRECTION_SEND_RECEIVE;
+        mediaInfo.videoDir  = MediaInfo.DIRECTION_RECEIVE;
+
+        assertTrue(MtcCallUtils.is1WayVideoByRemoteEnd(mediaInfo));
+    }
+
+    @Test
+    public void testIsAudioEvsCategory() {
+        assertFalse(MtcCallUtils.isAudioEvsCategory(MediaInfo.AUDIO_QUALITY_MAX));
+        assertTrue(MtcCallUtils.isAudioEvsCategory(MediaInfo.AUDIO_QUALITY_EVS_FB));
+    }
+
+    @Test
+    public void testIsAudioHDQuality() {
+        assertFalse(MtcCallUtils.isAudioHDQuality(MediaInfo.AUDIO_QUALITY_MAX));
+        assertTrue(MtcCallUtils.isAudioHDQuality(MediaInfo.AUDIO_QUALITY_EVS_WB));
+    }
+
+    @Test
+    public void testIsAudioUHDQuality() {
+        assertFalse(MtcCallUtils.isAudioUHDQuality(MediaInfo.AUDIO_QUALITY_MAX));
+        assertTrue(MtcCallUtils.isAudioUHDQuality(MediaInfo.AUDIO_QUALITY_EVS_FB));
+    }
+
+    @Test
+    public void testIsCallTerminatedByCallForward() {
+        CallReasonInfo callReasonInfo = new CallReasonInfo();
+
+        assertFalse(MtcCallUtils.isCallTerminatedByCallForward(callReasonInfo));
+
+        callReasonInfo.mCode = CallReasonInfo.CODE_USER_TERMINATED;
+        callReasonInfo.mExtraCode = CallReasonInfo.EXTRA_USER_TERMINATED_ECT;
+
+        assertTrue(MtcCallUtils.isCallTerminatedByCallForward(callReasonInfo));
+    }
+
+    @Test
+    public void testIsCallTerminatedByJoiningConference() {
+        assertFalse(MtcCallUtils.isCallTerminatedByJoiningConference(
+                CallReasonInfo.CODE_LOCAL_ILLEGAL_ARGUMENT));
+        assertTrue(MtcCallUtils.isCallTerminatedByJoiningConference(
+                CallReasonInfo.CODE_LOCAL_ENDED_BY_CONFERENCE_MERGE));
+    }
+
+    @Test
+    public void testIsCallWaitingEnabled() {
+        assertFalse(MtcCallUtils.isCallWaitingEnabled(null));
+
+        SuppInfo suppInfo = new SuppInfo();
+
+        assertFalse(MtcCallUtils.isCallWaitingEnabled(suppInfo));
+
+        suppInfo.addServiceBool(SuppInfo.SUPP_TYPE_CW, true);
+
+        assertTrue(MtcCallUtils.isCallWaitingEnabled(suppInfo));
+    }
+
+    @Test
+    public void testIsHoldMediaOnVideoCall() {
+        MediaInfo mediaInfo = new MediaInfo();
+
+        assertFalse(MtcCallUtils.isHoldMediaOnVideoCall(mediaInfo,  true));
+
+        mediaInfo.audioDir = MediaInfo.DIRECTION_SEND;
+        mediaInfo.videoDir = MediaInfo.DIRECTION_SEND;
+
+        assertFalse(MtcCallUtils.isHoldMediaOnVideoCall(mediaInfo, true));
+        assertTrue(MtcCallUtils.isHoldMediaOnVideoCall(mediaInfo, false));
+
+        mediaInfo.videoDir = MediaInfo.DIRECTION_INACTIVE;
+
+        assertTrue(MtcCallUtils.isHoldMediaOnVideoCall(mediaInfo, true));
+    }
+
+    @Test
+    public void testIsHoldMediaOnVideoCallByRemoteEnd() {
+        MediaInfo mediaInfo = new MediaInfo();
+
+        assertFalse(MtcCallUtils.isHoldMediaOnVideoCallByRemoteEnd(mediaInfo,  true));
+
+        mediaInfo.audioDir = MediaInfo.DIRECTION_RECEIVE;
+        mediaInfo.videoDir = MediaInfo.DIRECTION_RECEIVE;
+
+        assertFalse(MtcCallUtils.isHoldMediaOnVideoCallByRemoteEnd(mediaInfo, true));
+        assertTrue(MtcCallUtils.isHoldMediaOnVideoCallByRemoteEnd(mediaInfo, false));
+
+        mediaInfo.videoDir = MediaInfo.DIRECTION_INACTIVE;
+
+        assertTrue(MtcCallUtils.isHoldMediaOnVideoCallByRemoteEnd(mediaInfo, true));
+    }
+
+    @Test
+    public void testIsUnholdMediaOnVideoCall() {
+        MediaInfo mediaInfo = new MediaInfo();
+
+        assertFalse(MtcCallUtils.isUnholdMediaOnVideoCall(mediaInfo,  true));
+
+        mediaInfo.audioDir = MediaInfo.DIRECTION_SEND_RECEIVE;
+        mediaInfo.videoDir = MediaInfo.DIRECTION_SEND_RECEIVE;
+
+        assertTrue(MtcCallUtils.isUnholdMediaOnVideoCall(mediaInfo, true));
+        assertTrue(MtcCallUtils.isUnholdMediaOnVideoCall(mediaInfo, false));
+
+        mediaInfo.videoDir = MediaInfo.DIRECTION_INACTIVE;
+
+        assertTrue(MtcCallUtils.isUnholdMediaOnVideoCall(mediaInfo, true));
+    }
+
+    @Test
+    public void testIsUnholdMediaOnVideoCallByRemoteEnd() {
+        MediaInfo mediaInfo = new MediaInfo();
+
+        assertFalse(MtcCallUtils.isUnholdMediaOnVideoCallByRemoteEnd(mediaInfo));
+
+        mediaInfo.audioDir = MediaInfo.DIRECTION_SEND;
+        mediaInfo.videoDir = MediaInfo.DIRECTION_SEND;
+
+        assertTrue(MtcCallUtils.isUnholdMediaOnVideoCallByRemoteEnd(mediaInfo));
+    }
+
+    @Test
+    public void testIsLocalHoldToneEnforced() {
+        SuppInfo suppInfo = new SuppInfo();
+
+        assertFalse(MtcCallUtils.isLocalHoldToneEnforced(suppInfo));
+
+        suppInfo.addServiceBool(SuppInfo.SUPP_TYPE_ENFORCE_LT, true);
+
+        assertTrue(MtcCallUtils.isLocalHoldToneEnforced(suppInfo));
+    }
+
+    @Test
+    public void isOutgoingCallsBarred_withDefaultReason_returnsFalse() {
+        CallReasonInfo callReasonInfo = new CallReasonInfo();
+        assertFalse(MtcCallUtils.isOutgoingCallsBarred(callReasonInfo));
+    }
+
+    @Test
+    public void isOutgoingCallsBarred_withCorrectCodeAndIncorrectExtraCode_returnsFalse() {
+        CallReasonInfo callReasonInfo = new CallReasonInfo();
+        callReasonInfo.mCode = CallReasonInfo.CODE_SIP_USER_REJECTED;
+        callReasonInfo.mExtraCode = 1; // some other code
+        assertFalse(MtcCallUtils.isOutgoingCallsBarred(callReasonInfo));
+    }
+
+    @Test
+    public void isOutgoingCallsBarred_withIncorrectCodeAndCorrectExtraCode_returnsFalse() {
+        CallReasonInfo callReasonInfo = new CallReasonInfo();
+        callReasonInfo.mCode = CallReasonInfo.CODE_USER_TERMINATED;
+        callReasonInfo.mExtraCode = 53;
+        assertFalse(MtcCallUtils.isOutgoingCallsBarred(callReasonInfo));
+    }
+
+    @Test
+    public void isOutgoingCallsBarred_withCorrectCodes_returnsTrue() {
+        CallReasonInfo callReasonInfo = new CallReasonInfo();
+        callReasonInfo.mCode = CallReasonInfo.CODE_SIP_USER_REJECTED;
+        callReasonInfo.mExtraCode = 53;
+        assertTrue(MtcCallUtils.isOutgoingCallsBarred(callReasonInfo));
+    }
+
+    @Test
+    public void testisSuppInfoBoolean() {
+        MtcCall call = Mockito.mock(MtcCall.class);
+
+        assertFalse(MtcCallUtils.isSuppInfoBoolean(SuppInfo.SUPP_TYPE_GEOLOCATION));
+        assertTrue(MtcCallUtils.isSuppInfoBoolean(SuppInfo.SUPP_TYPE_ENFORCE_LT));
+    }
+
+    @Test
+    public void isSuppInfoInt() {
+        MtcCall call = Mockito.mock(MtcCall.class);
+
+        assertFalse(MtcCallUtils.isSuppInfoInt(SuppInfo.SUPP_TYPE_ENFORCE_LT));
+        assertTrue(MtcCallUtils.isSuppInfoInt(SuppInfo.SUPP_TYPE_CALLING_NUM_VERIFICATION));
+    }
+
+    @Test
+    public void isSuppInfoString() {
+        MtcCall call = Mockito.mock(MtcCall.class);
+
+        assertFalse(MtcCallUtils.isSuppInfoString(SuppInfo.SUPP_TYPE_GEOLOCATION));
+        assertTrue(MtcCallUtils.isSuppInfoString(SuppInfo.SUPP_TYPE_CNAP));
+    }
+
+    @Test
+    public void testReverseMediaDirection() {
+        MediaInfo mediaInfo = new MediaInfo();
+        mediaInfo.audioDir = MediaInfo.DIRECTION_SEND_RECEIVE;
+        mediaInfo.videoDir = MediaInfo.DIRECTION_SEND_RECEIVE;
+
+        MtcCallUtils.reverseMediaDirection(mediaInfo);
+
+        assertEquals(MediaInfo.DIRECTION_SEND_RECEIVE, mediaInfo.audioDir);
+        assertEquals(MediaInfo.DIRECTION_SEND_RECEIVE, mediaInfo.videoDir);
+
+        mediaInfo.audioDir = MediaInfo.DIRECTION_RECEIVE;
+        mediaInfo.videoDir = MediaInfo.DIRECTION_RECEIVE;
+
+        MtcCallUtils.reverseMediaDirection(mediaInfo);
+
+        assertEquals(MediaInfo.DIRECTION_SEND, mediaInfo.audioDir);
+        assertEquals(MediaInfo.DIRECTION_SEND, mediaInfo.videoDir);
+
+        mediaInfo.audioDir = MediaInfo.DIRECTION_SEND;
+        mediaInfo.videoDir = MediaInfo.DIRECTION_SEND;
+
+        MtcCallUtils.reverseMediaDirection(mediaInfo);
+
+        assertEquals(MediaInfo.DIRECTION_RECEIVE, mediaInfo.audioDir);
+        assertEquals(MediaInfo.DIRECTION_RECEIVE, mediaInfo.videoDir);
+    }
+}

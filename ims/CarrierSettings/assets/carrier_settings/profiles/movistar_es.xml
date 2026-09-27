@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <int name="imsss.ut_as_server_port_int" value="8089" />
+    <pbundle_as_map name="imsvoice.amrnb_payload_description_bundle">
+        <pbundle_as_map name="108">
+            <int name="imsvoice.amr_codec_attribute_payload_format_int" value="1" />
+        </pbundle_as_map>
+    </pbundle_as_map>
+    <pbundle_as_map name="imsvoice.amrwb_payload_description_bundle">
+        <pbundle_as_map name="110">
+            <int name="imsvoice.amr_codec_attribute_payload_format_int" value="1" />
+        </pbundle_as_map>
+    </pbundle_as_map>
+    <pbundle_as_map name="imsvoice.audio_codec_capability_payload_types_bundle">
+        <int-array name="imsvoice.amrnb_payload_type_int_array" num="2">
+            <item value="102" />
+            <item value="108" />
+        </int-array>
+        <int-array name="imsvoice.amrwb_payload_type_int_array" num="2">
+            <item value="104" />
+            <item value="110" />
+        </int-array>
+        <int-array name="imsvoice.dtmfnb_payload_type_int_array" num="1">
+            <item value="97" />
+        </int-array>
+        <int-array name="imsvoice.dtmfwb_payload_type_int_array" num="1">
+            <item value="96" />
+        </int-array>
+    </pbundle_as_map>
+    <int name="imsvoice.conference_subscribe_type_int" value="1" />
+    <boolean name="imsvoice.oip_source_from_header_bool" value="true" />
+    <boolean name="imsvoice.prack_supported_for_18x_bool" value="true" />
+    <int name="imsvoice.ringback_timer_millis_int" value="180000" />
+    <int name="imsvoice.ringing_timer_millis_int" value="180000" />
+    <int name="imsvoice.session_refresh_method_int" value="0" />
+</carrier_config>

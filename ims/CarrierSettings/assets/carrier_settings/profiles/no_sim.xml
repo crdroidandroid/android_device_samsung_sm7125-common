@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <string name="ims.ims_user_agent_string">#MANUFACTURE#_#MODEL#_Android #AV#_#BUILD#</string>
+    <int-array name="imsss.ut_server_based_services_int_array" num="13">
+        <item value="12" />
+        <item value="17" />
+        <item value="18" />
+        <item value="19" />
+        <item value="20" />
+        <item value="21" />
+        <item value="13" />
+        <item value="14" />
+        <item value="15" />
+        <item value="16" />
+        <item value="8" />
+        <item value="11" />
+        <item value="9" />
+    </int-array>
+    <int-array name="imsss.ut_terminal_based_services_int_array" num="1">
+        <item value="0" />
+    </int-array>
+    <pbundle_as_map name="imsvoice.amrnb_payload_description_bundle">
+        <pbundle_as_map name="103">
+            <int name="imsvoice.amr_codec_attribute_payload_format_int" value="1" />
+        </pbundle_as_map>
+    </pbundle_as_map>
+    <pbundle_as_map name="imsvoice.amrwb_payload_description_bundle">
+        <pbundle_as_map name="105">
+            <int name="imsvoice.amr_codec_attribute_payload_format_int" value="1" />
+        </pbundle_as_map>
+    </pbundle_as_map>
+    <pbundle_as_map name="imsvoice.audio_codec_capability_payload_types_bundle">
+        <int-array name="imsvoice.amrnb_payload_type_int_array" num="2">
+            <item value="98" />
+            <item value="103" />
+        </int-array>
+        <int-array name="imsvoice.amrwb_payload_type_int_array" num="2">
+            <item value="100" />
+            <item value="105" />
+        </int-array>
+        <int-array name="imsvoice.dtmfnb_payload_type_int_array" num="1">
+            <item value="97" />
+        </int-array>
+        <int-array name="imsvoice.dtmfwb_payload_type_int_array" num="1">
+            <item value="96" />
+        </int-array>
+    </pbundle_as_map>
+</carrier_config>

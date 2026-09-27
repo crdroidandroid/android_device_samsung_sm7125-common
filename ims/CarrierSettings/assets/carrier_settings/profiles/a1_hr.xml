@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <boolean name="imsvoice.oip_source_from_header_bool" value="true" />
+</carrier_config>

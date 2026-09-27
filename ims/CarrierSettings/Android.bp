@@ -1,0 +1,48 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package {
+    default_applicable_licenses: [
+        "carrier_settings_aosp_license",
+        "carrier_settings_google_license",
+    ],
+}
+
+license {
+    name: "carrier_settings_aosp_license",
+    visibility: ["//visibility:public"],
+    license_kinds: [
+        "SPDX-license-identifier-Apache-2.0",
+        "SPDX-license-identifier-GPL-2.0-only",
+    ],
+    license_text: [
+        "LICENSES/Apache-2.0.txt",
+        "LICENSES/GPL-2.0-only.txt",
+    ],
+}
+
+license {
+    name: "carrier_settings_google_license",
+    visibility: ["//visibility:public"],
+    license_kinds: ["legacy_proprietary"],
+    license_text: ["LICENSES/Google-CarrierSettings-NOTICE.txt"],
+}
+
+android_app {
+    name: "CarrierSettings_sm7125",
+    certificate: "platform",
+    sdk_version: "current",
+    min_sdk_version: "35",
+    system_ext_specific: true,
+    manifest: "AndroidManifest.xml",
+    asset_dirs: ["assets"],
+    resource_dirs: [],
+    required: ["preinstalled-packages-carriersettings.xml"],
+    visibility: ["//visibility:public"],
+}
+
+prebuilt_etc {
+    name: "preinstalled-packages-carriersettings.xml",
+    src: "sysconfig/preinstalled-packages-carriersettings.xml",
+    sub_dir: "sysconfig",
+    system_ext_specific: true,
+}

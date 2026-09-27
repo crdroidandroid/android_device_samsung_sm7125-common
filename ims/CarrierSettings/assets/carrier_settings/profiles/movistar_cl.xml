@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <string name="imsvoice.conference_factory_uri_string">conference@ims.mnc002.mcc730.3gppnetwork.org</string>
+</carrier_config>

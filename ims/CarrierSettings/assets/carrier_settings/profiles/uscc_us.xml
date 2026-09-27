@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <int name="ims.ipv4_sip_mtu_size_cellular_int" value="1080" />
+    <int name="ims.ipv6_sip_mtu_size_cellular_int" value="1280" />
+    <int name="ims.registration_expiry_timer_sec_int" value="7200" />
+    <int name="ims.request_uri_type_int" value="1" />
+    <boolean name="ims.sip_over_ipsec_enabled_bool" value="false" />
+    <int name="ims.sip_timer_b_millis_int" value="130000" />
+    <int name="ims.sip_timer_j_millis_int" value="32000" />
+    <pbundle_as_map name="imsvoice.amrnb_payload_description_bundle">
+        <pbundle_as_map name="102">
+            <int-array name="imsvoice.amr_codec_attribute_modeset_int_array" num="4">
+                <item value="0" />
+                <item value="2" />
+                <item value="4" />
+                <item value="7" />
+            </int-array>
+        </pbundle_as_map>
+        <pbundle_as_map name="103">
+            <int-array name="imsvoice.amr_codec_attribute_modeset_int_array" num="4">
+                <item value="0" />
+                <item value="2" />
+                <item value="4" />
+                <item value="7" />
+            </int-array>
+            <int name="imsvoice.amr_codec_attribute_payload_format_int" value="1" />
+        </pbundle_as_map>
+    </pbundle_as_map>
+    <pbundle_as_map name="imsvoice.amrwb_payload_description_bundle">
+        <pbundle_as_map name="104">
+            <int-array name="imsvoice.amr_codec_attribute_modeset_int_array" num="3">
+                <item value="0" />
+                <item value="1" />
+                <item value="2" />
+            </int-array>
+        </pbundle_as_map>
+        <pbundle_as_map name="105">
+            <int-array name="imsvoice.amr_codec_attribute_modeset_int_array" num="3">
+                <item value="0" />
+                <item value="1" />
+                <item value="2" />
+            </int-array>
+            <int name="imsvoice.amr_codec_attribute_payload_format_int" value="1" />
+        </pbundle_as_map>
+    </pbundle_as_map>
+    <pbundle_as_map name="imsvoice.audio_codec_capability_payload_types_bundle">
+        <int-array name="imsvoice.amrnb_payload_type_int_array" num="2">
+            <item value="102" />
+            <item value="103" />
+        </int-array>
+        <int-array name="imsvoice.amrwb_payload_type_int_array" num="2">
+            <item value="104" />
+            <item value="105" />
+        </int-array>
+        <int-array name="imsvoice.dtmfnb_payload_type_int_array" num="1">
+            <item value="97" />
+        </int-array>
+        <int-array name="imsvoice.dtmfwb_payload_type_int_array" num="1">
+            <item value="96" />
+        </int-array>
+    </pbundle_as_map>
+    <string name="imsvoice.conference_factory_uri_string">usccconf@usccims.com</string>
+    <boolean name="imsvoice.include_caller_id_service_codes_in_sip_invite_bool" value="true" />
+    <int name="imsvoice.minimum_session_expires_timer_sec_int" value="900" />
+    <int name="imsvoice.ringback_timer_millis_int" value="120000" />
+    <int name="imsvoice.ringing_timer_millis_int" value="60000" />
+    <int name="imsvoice.session_refresher_type_int" value="2" />
+</carrier_config>

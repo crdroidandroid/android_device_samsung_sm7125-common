@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <string name="ims.ims_user_agent_string">#MANUFACTURE# #MODEL# Android #BUILD#</string>
+    <int name="imsvoice.conference_subscribe_type_int" value="0" />
+    <int name="imsvoice.session_refresher_type_int" value="2" />
+</carrier_config>

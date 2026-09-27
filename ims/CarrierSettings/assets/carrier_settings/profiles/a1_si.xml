@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <int name="imsvoice.ringback_timer_millis_int" value="120000" />
+    <int name="imsvoice.ringing_timer_millis_int" value="120000" />
+</carrier_config>

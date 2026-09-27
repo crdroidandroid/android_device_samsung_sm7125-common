@@ -1,0 +1,162 @@
+/*
+ * Copyright (C) 2022 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#ifndef MTC_SESSION_H_
+#define MTC_SESSION_H_
+
+#include "ImsList.h"
+#include "ImsTypeDef.h"
+#include "call/IMtcCall.h"
+#include "call/IMtcSession.h"
+#include "call/extension/MtcExtensionSet.h"
+#include <optional>
+#include <vector>
+
+class IMessage;
+class IConferenceManager;
+class IEctManager;
+class IMessageSender;
+class IMtcAosConnector;
+class IMtcCallContext;
+class IMtcCallController;
+class IMtcCallManager;
+class IMtcDialingPlan;
+class IMtcExtensionSet;
+class IMtcMediaManager;
+class IMtcPreconditionManager;
+class IMtcService;
+class IMtcSipInterfaceFactory;
+class ISession;
+
+class MtcSession final : public IMtcSession
+{
+public:
+    explicit MtcSession(IN IMtcCallContext& objContext, IN ISession& objSession,
+            IN CallType eCallType, IN IMessageSender* pMessageSender);
+    virtual ~MtcSession() override;
+    MtcSession(IN const MtcSession&) = delete;
+    MtcSession& operator=(IN const MtcSession&) = delete;
+
+    IMS_RESULT Start() override;
+    IMS_RESULT SendProvisionalResponse(IN IMS_BOOL bUserAlert, IN IMS_BOOL bReliable) override;
+    IMS_RESULT SendPrack(IN IMS_BOOL bSdpOfferRequired) override;
+    IMS_RESULT RespondToPrack(IN IMS_SINT32 eStatusCode) override;
+    IMS_RESULT SendEarlyUpdate(IN UpdateType eUpdateType) override;
+    IMS_RESULT RespondToEarlyUpdate(IN IMS_SINT32 eStatusCode) override;
+    IMS_RESULT SendAck() override;
+    IMS_RESULT Accept() override;
+    IMS_RESULT Reject(IN const CallReasonInfo& objReason) override;
+    IMS_RESULT Update(IN UpdateType eUpdateType, IN IMS_BOOL bIncludeAlertInfo,
+            IN IMS_SINT32 eMethod) override;
+    IMS_RESULT AcceptUpdate() override;
+    IMS_RESULT CancelUpdate(IN const CallReasonInfo& objReason) override;
+    IMS_RESULT Terminate(IMS_BOOL bUseBye, IN const CallReasonInfo& objReason) override;
+
+    inline void SetSessionTerminatedOrStartFailed() override
+    {
+        m_bSessionTerminatedOrStartFailed = IMS_TRUE;
+    }
+
+    void HandleRequest(IN RequestType eType, IN const IMessage& objRequest) override;
+    void HandleResponse(IN ResponseType eType, IN const IMessage& objResponse) override;
+
+    void SetCallType(IN CallType eNewCallType) override;
+    void SetCapableCallType(IN CallType eNewCallType) override;
+    inline CallType GetCallType() const override { return m_eCallType; }
+    inline CallType GetPreviousCallType() const override { return m_ePreviousCallType; }
+    inline ISession& GetISession() override { return m_objSession; }
+    inline MtcExtensionSet& GetExtensionSet() override { return m_objExtensionSet; }
+    inline IMS_BOOL IsVideoCapable() const override { return m_bVideoCapable; }
+    inline IMS_BOOL IsRttCapable() const override { return m_bRttCapable; }
+    inline IMS_BOOL IsPrackPending() const override { return m_bPrackPending; }
+    inline UpdateType GetOngoingUpdateType() const override { return m_eOngoingUpdateType; }
+
+private:
+    enum class ResultSetSdp
+    {
+        NO_SDP,
+        FAILURE,
+        SUCCESS
+    };
+
+    ImsList<IMtcExtension*> GetSupportedExtensions() const;
+
+    void UpdateSessionProperty();
+    void SetSessionSdpPreviewMode();
+    IMS_RESULT UpdateCallTypeFromMessage(IN const IMessage& objMessage, IN IMS_BOOL bSkipSameType);
+    void UpdateCapabilityFromMessage(IN const IMessage& objMessage);
+
+    /**
+     * @brief Returns remote capability based on the media feature tag and SDP.
+     *
+     * The capability can be identified as following table:
+     *
+     * | Remote Tag              | Remote SDP                 | Remote Capability |
+     * | :---------------------- | :------------------------- | :---------------- |
+     * | Media tag exists        | Any                        | Capable           |
+     * | Media tag doesn't exist | Media exists in SDP        | Capable           |
+     * |                         | Media doesn't exist in SDP | Uncapable         |
+     * |                         | No SDP                     | Unknown           |
+     * | No Contact header       | Media exists in SDP        | Capable           |
+     * |                         | Media doesn't exist in SDP | Unknown           |
+     * |                         | No SDP                     | Unknown           |
+     *
+     * @param bHasFeatureTag Indicates if the remote has the media feature tag in the Contact header
+     *                       or not. {@code std::nullopt} if it's unknown. (e.g. No header)
+     * @param bContainsMediaInSdp Indicates if the SDP from the remote contains the media.
+     *                            {@code std::nullopt} if it's unknown. (e.g. No SDP)
+     * @return {@code true} if remote has the media capability, {@code false} if it doesn't.
+     *         {@code std::nullopt} if it cannot be identified.
+     */
+    std::optional<IMS_BOOL> IdentifyRemoteCapability(IN std::optional<IMS_BOOL> bHasFeatureTag,
+            IN std::optional<IMS_BOOL> bContainsMediaInSdp) const;
+
+    void HandleInConference(IN const IMessage& objMessage);
+    CallType GetCallTypeForOfferlessInvite() const;
+    CallType GetCallTypeForOfferlessReInvite() const;
+    CallType GetCallTypeByHistory() const;
+    CallType MayGetFirstCallType() const;
+    ResultSetSdp SetSdpToSend(IN IMS_BOOL bAllowReOffer,
+            IN IMS_BOOL bAnswerForOfferlessReInvite = IMS_FALSE,
+            IN IMS_BOOL bInitialInvite = IMS_FALSE);
+
+    IMS_BOOL IsRegisteredFeature(IMS_UINT32 nFeature) const;
+    IMS_BOOL IsAlertInfoRequired(IMS_SINT32 nStatusCode) const;
+    IMS_BOOL IsInHistory(IN CallType eCallType) const;
+    void SaveCallTypeHistory(IN CallType eCallType);
+
+    void HandleByeTransactionIfNeeded();
+    void Send183BeforeAlertingForNon100rel();
+
+    IMtcCallContext& m_objContext;
+    ISession& m_objSession;
+
+    IMessageSender* m_pMessageSender;
+    MtcExtensionSet m_objExtensionSet;
+
+    CallType m_eCallType;
+    CallType m_ePreviousCallType;
+    IMS_BOOL m_bVideoCapable;
+    IMS_BOOL m_bRttCapable;
+    IMS_BOOL m_bTerminated;
+    IMS_BOOL m_bSessionTerminatedOrStartFailed;
+    IMS_BOOL m_bPrackPending;
+    UpdateType m_eOngoingUpdateType;
+
+    std::vector<CallType> m_objCallTypeHistory;
+};
+
+#endif

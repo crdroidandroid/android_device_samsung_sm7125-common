@@ -1,0 +1,468 @@
+/*
+ * Copyright (C) 2022 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+#include "SipDebug.h"
+#include "msg/SipMessage.h"
+#include "msg/SipMsgUtil.h"
+#include "platform/SipMemory.h"
+#include "platform/SipString.h"
+
+SipMsgUtil::HdrLenRecord SipMsgUtil::s_objHdrLenRecord[SipMsgUtil::MAX_HDR_NAME_LEN] = {};
+
+// clang-format off
+const SIP_CHAR* SipMsgUtil::HEADER_NAMES[] = {
+        "Allow",  // 0
+        "Allow-Events",
+        "Authorization",
+        "Call-ID",
+        "Contact",
+        "Contact",
+        "Contact",
+        "Content-Disposition",
+        "Content-Encoding",
+        "Content-Length",
+        "Content-Type",  // 10
+        "CSeq",
+        "Event",
+        "Expires",
+        "Expires",
+        "Expires",
+        "Accept",
+        "Min-Expires",
+        "From",
+        "Max-Forwards",
+        "MIME-Version",  // 20
+        "Privacy",
+        "P-Preferred-Identity",
+        "P-Asserted-Identity",
+        "Min-SE",
+        "Path",
+        "P-Associated-URI",
+        "P-Called-Party-ID",
+        "P-Visited-Network-ID",
+        "P-Charging-Function-Addresses",
+        "P-Access-Network-Info",  // 30
+        "P-Charging-Vector",
+        "Service-Route",
+        "History-Info",
+        "Request-Disposition",
+        "Accept-Contact",
+        "Reject-Contact",
+        "Join",
+        "SIP-If-Match",
+        "SIP-ETag",
+        "Proxy-Authenticate",  // 40
+        "Proxy-Authorization",
+        "RAck",
+        "Record-Route",
+        "Referred-By",
+        "Refer-To",
+        "Replaces",
+        "Require",
+        "Route",
+        "RSeq",
+        "Security-Client",  // 50
+        "Security-Verify",
+        "Security-Server",
+        "Session-Expires",
+        "Subscription-State",
+        "Supported",
+        "Timestamp",
+        "To",
+        "Unsupported",
+        "Via",
+        "Warning",  // 60
+        "WWW-Authenticate",
+        "Unknown",
+        "Retry-After",
+        "Retry-After",
+        "Retry-After",
+        "P-Early-Media",
+        "Resource-Priority",
+        "Accept-Resource-Priority",
+        "Date",
+        "Accept-Encoding",  // 70
+        "Accept-Language",
+        "Alert-Info",
+        "Answer-Mode",
+        "Authentication-Info",
+        "Call-Info",
+        "Content-Language",
+        "Error-Info",
+        "Flow-Timer",
+        "Identity",
+        "Identity-Info",  // 80
+        "In-Reply-To",
+        "Organization",
+        "P-Answer-State",
+        "Permission-Missing",
+        "P-Media-Authorization",
+        "P-Profile-Key",
+        "P-Refused-URI-List",
+        "Priority",
+        "Priv-Answer-Mode",
+        "Proxy-Require",  // 90
+        "P-Served-User",
+        "P-User-Database",
+        "Reason",
+        "Refer-Sub",
+        "Reply-To",
+        "Response-Key",
+        "Server",
+        "Subject",
+        "Suppress-If-Match",
+        "Target-Dialog",  // 100
+        "Trigger-Consent",
+        "User-Agent",
+        "Feature-Caps",
+        "Geolocation",
+        "Geolocation-Error",
+        "Geolocation-Routing",
+        "Info-Package",
+        "Max-Breadth",
+        "P-Asserted-Service",
+        "Policy-Contact",  // 110
+        "Policy-ID",
+        "P-Preferred-Service",
+        "Recv-Info",
+        "Session-ID",
+        "UNKNOWN",  // 115
+};
+// clang-format on
+
+const SIP_CHAR* SipMsgUtil::CONTENT_HEADERS[SipMsgUtil::CONTENT_HDR_COUNT] = {
+        "Content-Type",        /*CONTENT_TYPE*/
+        "Content-Disposition", /*CONTENT_DISPOSITION*/
+        "Content-Encoding",    /*CONTENT_TRANSFER_ENCODING*/
+        "Content-ID",          /*CONTENT_ID*/
+        "Content-Description"  /*CONTENT_DESCRIPTION*/
+};
+
+const SIP_CHAR SipMsgUtil::COMPACT_HEADER_NAMES[] = "abcdefijklmnorstuvxy";
+const SIP_INT32 SipMsgUtil::COMPACT_HEADERS[] = {SipHeaderBase::ACCEPT_CONTACT,
+        SipHeaderBase::REFERRED_BY, SipHeaderBase::CONTENT_TYPE, SipHeaderBase::REQUEST_DISPOSITION,
+        SipHeaderBase::CONTENT_ENCODING, SipHeaderBase::FROM, SipHeaderBase::CALL_ID,
+        SipHeaderBase::REJECT_CONTACT, SipHeaderBase::SUPPORTED, SipHeaderBase::CONTENT_LENGTH,
+        SipHeaderBase::CONTACT, SipHeaderBase::IDENTITY_INFO, SipHeaderBase::EVENT,
+        SipHeaderBase::REFER_TO, SipHeaderBase::SUBJECT, SipHeaderBase::TO,
+        SipHeaderBase::ALLOW_EVENTS, SipHeaderBase::VIA, SipHeaderBase::SESSION_EXPIRES,
+        SipHeaderBase::IDENTITY};
+
+const SIP_CHAR SipMsgUtil::SIP_VERSION[] = "SIP/2.0";
+
+const SIP_CHAR SipMsgUtil::METHOD_INVITE[] = "INVITE";
+const SIP_CHAR SipMsgUtil::METHOD_ACK[] = "ACK";
+const SIP_CHAR SipMsgUtil::METHOD_OPTION[] = "OPTIONS";
+const SIP_CHAR SipMsgUtil::METHOD_BYE[] = "BYE";
+const SIP_CHAR SipMsgUtil::METHOD_CANCEL[] = "CANCEL";
+const SIP_CHAR SipMsgUtil::METHOD_REGISTER[] = "REGISTER";
+const SIP_CHAR SipMsgUtil::METHOD_INFO[] = "INFO";
+const SIP_CHAR SipMsgUtil::METHOD_PRACK[] = "PRACK";
+const SIP_CHAR SipMsgUtil::METHOD_SUBSCRIBE[] = "SUBSCRIBE";
+const SIP_CHAR SipMsgUtil::METHOD_NOTIFY[] = "NOTIFY";
+const SIP_CHAR SipMsgUtil::METHOD_UPDATE[] = "UPDATE";
+const SIP_CHAR SipMsgUtil::METHOD_MESSAGE[] = "MESSAGE";
+const SIP_CHAR SipMsgUtil::METHOD_REFER[] = "REFER";
+const SIP_CHAR SipMsgUtil::METHOD_PUBLISH[] = "PUBLISH";
+
+const SIP_CHAR SipMsgUtil::MULTIPART[] = "Multipart";
+const SIP_CHAR SipMsgUtil::SDP[] = "Sdp";
+
+SIP_VOID SipMsgUtil::SetValue(const SIP_CHAR* psSrc, SIP_CHAR*& pszDst)
+{
+    if (pszDst != SIP_NULL)
+    {
+        delete[] pszDst;
+    }
+
+    pszDst = SipPf_Strdup(psSrc);
+}
+
+SIP_INT32 SipMsgUtil::GetMsgType(const SIP_CHAR* pszStartPt)
+{
+    return (SipPf_Strncmp(SIP_SIPVER, pszStartPt, SIP_FOUR) == 0) ? SipMessage::RESP_TYPE
+                                                                  : SipMessage::REQ_TYPE;
+}
+
+SipUri::UriType SipMsgUtil::GetUriType(const SIP_CHAR* pStartPt, const SIP_CHAR* pEndPt)
+{
+    SIP_UINT32 nSize = (pEndPt - pStartPt) + SIP_ONE;
+    if ((nSize == SIP_THREE) && SipPf_Memcmp(SIP_SIP, pStartPt, nSize) == 0)
+    {
+        return SipUri::SCHEME_SIP;
+    }
+    else if ((nSize == SIP_FOUR) && SipPf_Memcmp(SIP_SIPS, pStartPt, nSize) == 0)
+    {
+        return SipUri::SCHEME_SIPS;
+    }
+    return SipUri::SCHEME_ABS;
+}
+
+SIP_INT32 SipMsgUtil::CheckAndGetHeaderType(SIP_INT32 nType)
+{
+    // support EXPIRES_ANY & EXPIRES_DATE
+    if ((nType == SipHeaderBase::EXPIRES_ANY) || (nType == SipHeaderBase::EXPIRES_DATE))
+    {
+        nType = SipHeaderBase::EXPIRES_SEC;
+    }  // support CONTACT_ANY & CONTACT_WILD
+    else if ((nType == SipHeaderBase::CONTACT_ANY) || (nType == SipHeaderBase::CONTACT_WILD))
+    {
+        nType = SipHeaderBase::CONTACT;
+    }  // Support for Retry-After Any & Sec header
+    else if ((nType == SipHeaderBase::RETRY_AFTER_ANY) ||
+            (nType == SipHeaderBase::RETRY_AFTER_DATE))
+    {
+        nType = SipHeaderBase::RETRY_AFTER_SEC;
+    }
+
+    return nType;
+}
+
+#ifdef SIP_STRICT_PARSING
+SIP_BOOL SipMsgUtil::IsValidAddress(const SIP_CHAR* pStartPt, SIP_UINT32 nDecLen)
+{
+    SIP_CHAR* pTempLoc = SIP_NULL;
+    SIP_CHAR* pEndPt = pStartPt + nDecLen - SIP_ONE;
+
+    /*Find the Start of header parameter*/
+    if (SipAbnfUtil::FindPostDelimiter(pStartPt, pEndPt, pTempLoc, QMARK) == SIP_FALSE)
+    {
+        return SIP_TRUE;
+    }
+
+    pStartPt = pTempLoc;
+    pTempLoc = SIP_NULL;
+
+    if (SipAbnfUtil::FindPostDelimiter(pStartPt, pEndPt, pTempLoc, PERCENT) == SIP_FALSE)
+    {
+        return SIP_TRUE;
+    }
+    return SIP_FALSE;
+}
+#endif
+
+const SIP_CHAR* SipMsgUtil::FindMsgBodyEnd(const SIP_CHAR* pStartPt, const SIP_CHAR* pEndPt,
+        const SIP_CHAR* pszBoundary, SIP_BOOL& bBodyEnd)
+{
+    if (pStartPt == SIP_NULL)
+    {
+        return SIP_NULL;
+    }
+
+    SIP_UINT16 nBoundaryLen = SipPf_Strlen(pszBoundary);
+    const SIP_CHAR* pNextPt = pStartPt + SIP_ONE;
+    const SIP_CHAR* pTempEndPt = pStartPt + nBoundaryLen + SIP_TWO;
+    const SIP_CHAR* pEndNext = pTempEndPt + SIP_ONE;
+
+    while (pEndNext <= pEndPt)
+    {
+        if (IS_HYPHEN(*pStartPt) && IS_HYPHEN(*pNextPt))
+        {
+            const SIP_CHAR* pTempStartPt = pStartPt + SIP_TWO;
+            if (SipPf_Strncmp(pTempStartPt, pszBoundary, nBoundaryLen) == SIP_ZERO)
+            {
+                if (IS_HYPHEN(*pTempEndPt) && IS_HYPHEN(*pEndNext))
+                {
+                    bBodyEnd = SIP_TRUE;
+                }
+
+                // Remove preceding CRLF: CRLF--boundary
+                // Start pointer: first '-'
+                return (pStartPt - SIP_TWO);
+            }
+        }
+        pStartPt++;
+        pNextPt = pStartPt + SIP_ONE;
+        pTempEndPt = pStartPt + nBoundaryLen + SIP_TWO;
+        pEndNext = pTempEndPt + SIP_ONE;
+    }
+    return SIP_NULL;
+}
+
+SIP_INT32 SipMsgUtil::GetMimeHeaderType(const SIP_CHAR* pszHdrName)
+{
+    if (pszHdrName == SIP_NULL)
+    {
+        return SipHeaderBase::UNKNOWN;
+    }
+
+    const SIP_CHAR NAME_CONTENT_TRANSFER_ENCODING[] = "Content-Transfer-Encoding";
+
+    switch (pszHdrName[0])
+    {
+        case 'c':
+        case 'C':
+            if ((SipPf_Stricmp(pszHdrName, "c") == 0) ||
+                    (SipPf_Stricmp(pszHdrName, HEADER_NAMES[SipHeaderBase::CONTENT_TYPE]) == 0))
+            {
+                return SipHeaderBase::CONTENT_TYPE;
+            }
+            else if (SipPf_Stricmp(pszHdrName, HEADER_NAMES[SipHeaderBase::CONTENT_LENGTH]) == 0)
+            {
+                return SipHeaderBase::CONTENT_LENGTH;
+            }
+            else if (SipPf_Stricmp(pszHdrName, HEADER_NAMES[SipHeaderBase::CONTENT_DISPOSITION]) ==
+                    0)
+            {
+                return SipHeaderBase::CONTENT_DISPOSITION;
+            }
+            else if ((SipPf_Stricmp(pszHdrName, HEADER_NAMES[SipHeaderBase::CONTENT_ENCODING]) ==
+                             0) ||
+                    (SipPf_Stricmp(pszHdrName, NAME_CONTENT_TRANSFER_ENCODING) == 0))
+            {
+                return SipHeaderBase::CONTENT_ENCODING;
+            }
+            else if (SipPf_Stricmp(pszHdrName, HEADER_NAMES[SipHeaderBase::CONTENT_LANGUAGE]) == 0)
+            {
+                return SipHeaderBase::CONTENT_LANGUAGE;
+            }
+            break;
+        default:
+            /*treat as unknown header*/
+            break;
+    }
+    return SipHeaderBase::UNKNOWN;
+}
+
+void SipMsgUtil::Init()
+{
+    static SIP_BOOL bInitialized = SIP_FALSE;
+
+    if (bInitialized)
+    {
+        return;
+    }
+
+    SipPf_Memset(s_objHdrLenRecord, 0, MAX_HDR_NAME_LEN * sizeof(struct HdrLenRecord));
+
+    for (SIP_INT32 nHdrIndex = SIP_ZERO; nHdrIndex < SipHeaderBase::TYPE_END; nHdrIndex++)
+    {
+        SIP_UINT32 nLength = SipPf_Strlen(HEADER_NAMES[nHdrIndex]);
+        SIP_UINT32 nEntries = s_objHdrLenRecord[nLength].NoOfEntries++;
+
+        s_objHdrLenRecord[nLength].objHeaders[nEntries].HdrType = nHdrIndex;
+        SipPf_Strcpy(
+                s_objHdrLenRecord[nLength].objHeaders[nEntries].HdrName, HEADER_NAMES[nHdrIndex]);
+    }
+
+    bInitialized = SIP_TRUE;
+}
+
+SIP_INT32 SipMsgUtil::GetHeaderType(const SIP_CHAR* pszHdrName)
+{
+    if (pszHdrName == SIP_NULL)
+    {
+        return SipHeaderBase::TYPE_INVALID;
+    }
+
+    SIP_INT32 nLen = SipPf_Strlen(pszHdrName);
+    if (nLen >= MAX_HDR_NAME_LEN)
+    {
+        return SipHeaderBase::UNKNOWN;
+    }
+    else if (nLen == SIP_ONE)
+    {
+        return GetHdrTypeCompact(pszHdrName[0]);
+    }
+
+    /*Content header are separately parsed based Content headers array CONTENT_HEADERS
+      and treated as known headers */
+    if (SipPf_Strnicmp(pszHdrName, "Content", SIP_SEVEN) == SIP_ZERO)
+    {
+        SIP_BOOL isContHdrFound = SIP_FALSE;
+        for (SIP_INT32 nNContHdr = SIP_ZERO; nNContHdr < CONTENT_HDR_COUNT; nNContHdr++)
+        {
+            if (SipPf_Stricmp(CONTENT_HEADERS[nNContHdr], pszHdrName) == SIP_ZERO)
+            {
+                isContHdrFound = SIP_TRUE;
+                break;
+            }
+        }
+        // Other Content headers treated as unknown headers like Content-Length.
+        if (isContHdrFound == SIP_FALSE)
+        {
+            return SipHeaderBase::UNKNOWN;
+        }
+    }  // Conversion for Expires / Retry-After Headers
+    else if (SipPf_Strnicmp(pszHdrName, "Expires", SIP_SEVEN) == SIP_ZERO)
+    {
+        return SipHeaderBase::EXPIRES_SEC;
+    }
+    else if (SipPf_Strnicmp(pszHdrName, "Retry-After", SIP_11) == SIP_ZERO)
+    {
+        return SipHeaderBase::RETRY_AFTER_SEC;
+    }
+
+    Init();
+
+    for (SIP_INT32 nNoOfHdr = SIP_ZERO; nNoOfHdr < s_objHdrLenRecord[nLen].NoOfEntries; nNoOfHdr++)
+    {
+        if (SipPf_Stricmp(s_objHdrLenRecord[nLen].objHeaders[nNoOfHdr].HdrName, pszHdrName) ==
+                SIP_ZERO)
+        {
+            return s_objHdrLenRecord[nLen].objHeaders[nNoOfHdr].HdrType;
+        }
+    }
+    return SipHeaderBase::UNKNOWN;
+}
+
+SIP_INT32 SipMsgUtil::GetHdrTypeCompact(SIP_CHAR cHdrName)
+{
+    cHdrName = SIP_TOLOWER(cHdrName);
+
+    /*Content-Length (l) header to be considered as unknown header to synch with Engine.*/
+    /*Other content headers which has compact form (type - c & encoding - e) are known headers in
+     * engine*/
+    if (cHdrName == 'l')
+    {
+        return SipHeaderBase::UNKNOWN;
+    }
+
+    const SIP_CHAR* pszTemp = COMPACT_HEADER_NAMES;
+    for (SIP_INT32 i = 0; (*pszTemp != SIP_NULL_CHAR); i++)
+    {
+        if (*pszTemp == cHdrName)
+        {
+            return COMPACT_HEADERS[i];
+        }
+        pszTemp++;
+    }
+    return SipHeaderBase::UNKNOWN;
+}
+
+SIP_CHAR SipMsgUtil::GetCompactHeaderName(SIP_INT32 nType)
+{
+    SIP_INT32 nHeaderType = CheckAndGetHeaderType(nType);
+    SIP_INT32 nLength = sizeof(COMPACT_HEADERS) / sizeof(COMPACT_HEADERS[0]);
+
+    for (SIP_INT32 i = 0; i < nLength; i++)
+    {
+        if (nHeaderType == COMPACT_HEADERS[i])
+        {
+            return COMPACT_HEADER_NAMES[i];
+        }
+    }
+    return SIP_NULL_CHAR;
+}
+
+const SIP_CHAR* SipMsgUtil::GetHeaderName(SIP_INT32 nType)
+{
+    if (nType < SIP_ZERO || nType >= SipHeaderBase::TYPE_END)
+    {
+        return SIP_NULL;
+    }
+
+    return HEADER_NAMES[nType];
+}

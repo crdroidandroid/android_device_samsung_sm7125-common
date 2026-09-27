@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <int name="ims.ipv4_sip_mtu_size_cellular_int" value="1280" />
+    <int name="ims.ipv6_sip_mtu_size_cellular_int" value="1280" />
+    <int name="imsss.ut_iptype_home_int" value="0" />
+    <int name="imsss.ut_iptype_roaming_int" value="0" />
+    <pbundle_as_map name="imsvoice.audio_codec_capability_payload_types_bundle">
+        <int-array name="imsvoice.amrnb_payload_type_int_array" num="2">
+            <item value="98" />
+            <item value="103" />
+        </int-array>
+        <int-array name="imsvoice.amrwb_payload_type_int_array" num="2">
+            <item value="100" />
+            <item value="105" />
+        </int-array>
+        <int-array name="imsvoice.dtmfnb_payload_type_int_array" num="1">
+            <item value="97" />
+        </int-array>
+        <int-array name="imsvoice.dtmfwb_payload_type_int_array" num="1">
+            <item value="96" />
+        </int-array>
+    </pbundle_as_map>
+    <int name="imsvoice.conference_subscribe_type_int" value="0" />
+    <int name="imsvoice.minimum_session_expires_timer_sec_int" value="600" />
+    <int name="imsvoice.session_refresh_method_int" value="0" />
+    <int name="imsvoice.session_refresher_type_int" value="0" />
+</carrier_config>

@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <boolean name="ims.gruu_enabled_bool" value="true" />
+    <string name="ims.ims_user_agent_string">#MANUFACTURE# #MODEL# #BUILD#</string>
+    <boolean name="ims.sip_over_ipsec_enabled_bool" value="false" />
+    <int name="ims.sip_timer_f_millis_int" value="32000" />
+    <string name="imsss.ut_as_server_fqdn_string">naf.ims.bell.ca</string>
+    <int name="imsss.ut_as_server_port_int" value="443" />
+    <boolean name="imsss.ut_requires_ims_registration_bool" value="true" />
+    <int name="imsss.ut_transport_type_int" value="3" />
+    <pbundle_as_map name="imsvoice.amrnb_payload_description_bundle">
+        <pbundle_as_map name="101">
+            <int name="imsvoice.amr_codec_attribute_payload_format_int" value="1" />
+        </pbundle_as_map>
+    </pbundle_as_map>
+    <pbundle_as_map name="imsvoice.amrwb_payload_description_bundle">
+        <pbundle_as_map name="103">
+            <int-array name="imsvoice.amr_codec_attribute_modeset_int_array" num="3">
+                <item value="0" />
+                <item value="1" />
+                <item value="2" />
+            </int-array>
+            <int name="imsvoice.amr_codec_attribute_payload_format_int" value="1" />
+        </pbundle_as_map>
+        <pbundle_as_map name="104">
+            <int-array name="imsvoice.amr_codec_attribute_modeset_int_array" num="3">
+                <item value="0" />
+                <item value="1" />
+                <item value="2" />
+            </int-array>
+        </pbundle_as_map>
+    </pbundle_as_map>
+    <int name="imsvoice.audio_as_bandwidth_kbps_int" value="50" />
+    <pbundle_as_map name="imsvoice.audio_codec_capability_payload_types_bundle">
+        <int-array name="imsvoice.amrnb_payload_type_int_array" num="2">
+            <item value="102" />
+            <item value="101" />
+        </int-array>
+        <int-array name="imsvoice.amrwb_payload_type_int_array" num="2">
+            <item value="104" />
+            <item value="103" />
+        </int-array>
+        <int-array name="imsvoice.dtmfnb_payload_type_int_array" num="1">
+            <item value="97" />
+        </int-array>
+        <int-array name="imsvoice.dtmfwb_payload_type_int_array" num="1">
+            <item value="96" />
+        </int-array>
+    </pbundle_as_map>
+    <int name="imsvoice.audio_rr_bandwidth_bps_int" value="1875" />
+    <int name="imsvoice.audio_rs_bandwidth_bps_int" value="625" />
+    <string name="imsvoice.conference_factory_uri_string">conf@ims.bell.ca</string>
+    <int name="imsvoice.minimum_session_expires_timer_sec_int" value="600" />
+    <int name="imsvoice.mo_call_request_timeout_millis_int" value="8000" />
+    <int name="imsvoice.ringback_timer_millis_int" value="150000" />
+    <int name="imsvoice.ringing_timer_millis_int" value="30000" />
+    <int name="imsvoice.session_privacy_type_int" value="2" />
+</carrier_config>

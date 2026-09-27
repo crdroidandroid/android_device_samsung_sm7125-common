@@ -1,0 +1,319 @@
+/*
+ * Copyright (C) 2023 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.android.imsstack.core.agents;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+
+import android.app.AlarmManager;
+import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.IntentFilter;
+import android.os.Handler;
+import android.testing.AndroidTestingRunner;
+import android.testing.TestableLooper;
+
+import androidx.test.filters.SmallTest;
+
+import com.android.imsstack.ContextFixture;
+import com.android.imsstack.base.TestAppContext;
+import com.android.imsstack.system.SystemInterface;
+
+import org.junit.After;
+import org.junit.Before;
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
+
+@RunWith(AndroidTestingRunner.class)
+@TestableLooper.RunWithLooper
+public class TimerAgentTest {
+    private static final int MAX_TIMER_ID = 3;
+    private static final long NATIVE_TIMER_ID = 100L;
+    private static final long SHORT_DURATION = 1000L; // 1 second
+    private static final long LONG_DURATION = 10000L; // 1 second
+
+    @Mock private SystemInterface mSystemInterface;
+    @Mock private WakeLockInterface mWakeLock;
+    @Mock private TimerInterface.Listener mTimerListener;
+
+    private AlarmManager mAlarmManager;
+    private BroadcastReceiver mTimerBroadcastReceiver;
+    private ContextFixture mContextFixture;
+    private TestAppContext mTestAppContext;
+    private TestableLooper mMainLooper;
+    private TestableLooper mTimerLooper;
+    private TimerAgent mTimerAgent;
+
+    @Before
+    public void setUp() throws Exception {
+        MockitoAnnotations.initMocks(this);
+
+        mMainLooper = TestableLooper.get(this);
+        mContextFixture = new ContextFixture();
+        mTestAppContext = new TestAppContext(mContextFixture.getTestDouble());
+        mTestAppContext.setUpWithLooper(mMainLooper.getLooper());
+
+        mAlarmManager = mTestAppContext.getSystemService(AlarmManager.class);
+        SystemInterface.setSystemInterface(mSystemInterface);
+        AgentFactory.getInstance().setAgent(WakeLockInterface.class, mWakeLock);
+
+        mTimerAgent = new TimerAgent();
+        mTimerAgent.init(mTestAppContext.getContext());
+        mTimerAgent.setMaxTimerId(MAX_TIMER_ID);
+        mTimerLooper = new TestableLooper(mTimerAgent.getTimerLooper());
+
+        ArgumentCaptor<BroadcastReceiver> captor = ArgumentCaptor.forClass(BroadcastReceiver.class);
+        verify(mTestAppContext.getBroadcastReceiverProxy())
+                .registerReceiver(captor.capture(), any(IntentFilter.class), any(Handler.class));
+        mTimerBroadcastReceiver = captor.getValue();
+    }
+
+    @After
+    public void tearDown() throws Exception {
+        if (mTimerAgent != null) {
+            mTimerAgent.cleanup();
+            mTimerAgent = null;
+            verify(mTestAppContext.getBroadcastReceiverProxy())
+                    .unregisterReceiver(any(BroadcastReceiver.class));
+        }
+
+        if (mTimerLooper != null) {
+            mTimerLooper.destroy();
+            mTimerLooper = null;
+        }
+
+        AgentFactory.getInstance().setAgent(WakeLockInterface.class, null);
+        SystemInterface.setSystemInterface(null);
+        mAlarmManager = null;
+        mWakeLock = null;
+        mSystemInterface = null;
+        mTimerListener = null;
+        mContextFixture = null;
+        mTestAppContext.tearDown();
+        mTestAppContext = null;
+        mMainLooper = null;
+    }
+
+    @Test
+    @SmallTest
+    public void testStartTimer() {
+        long tid = mTimerAgent.startTimer(SHORT_DURATION, mTimerListener);
+        assertEquals(1L, tid);
+
+        tid = mTimerAgent.startTimer(SHORT_DURATION, mTimerListener);
+        assertEquals(2L, tid);
+
+        tid = mTimerAgent.startTimer(SHORT_DURATION, mTimerListener);
+        assertEquals(TimerInterface.INVALID_TID, tid);
+    }
+
+    @Test
+    @SmallTest
+    public void testStartAndStopTimerWithShortDuration() {
+        long tid = mTimerAgent.startTimer(SHORT_DURATION, mTimerListener);
+
+        assertNotEquals(TimerInterface.INVALID_TID, tid);
+
+        mTimerAgent.stopTimer(tid);
+
+        verify(mAlarmManager, never()).setExactAndAllowWhileIdle(
+                eq(AlarmManager.ELAPSED_REALTIME_WAKEUP), anyLong(), any(PendingIntent.class));
+        verify(mAlarmManager, never()).cancel(any(PendingIntent.class));
+    }
+
+    @Test
+    @SmallTest
+    public void testStartAndStopTimerWithLongDuration() {
+        long tid = mTimerAgent.startTimer(LONG_DURATION, mTimerListener);
+
+        assertNotEquals(TimerInterface.INVALID_TID, tid);
+
+        mTimerAgent.stopTimer(tid);
+
+        verify(mAlarmManager).setExactAndAllowWhileIdle(
+                eq(AlarmManager.ELAPSED_REALTIME_WAKEUP), anyLong(), any(PendingIntent.class));
+        verify(mAlarmManager).cancel(any(PendingIntent.class));
+    }
+
+    @Test
+    @SmallTest
+    public void testStartTimerWhenAlarmManagerNull() {
+        mContextFixture.setSystemService(Context.ALARM_SERVICE, null);
+        long tid = mTimerAgent.startTimer(LONG_DURATION, mTimerListener);
+
+        assertEquals(TimerInterface.INVALID_TID, tid);
+    }
+
+    @Test
+    @SmallTest
+    public void testStopTimerWithInvalidTid() {
+        mTimerAgent.stopTimer(TimerInterface.INVALID_TID);
+
+        verify(mAlarmManager, never()).cancel(any(PendingIntent.class));
+    }
+
+    @Test
+    @SmallTest
+    public void testStopTimerWhenAlarmManagerNull() {
+        long tid = mTimerAgent.startTimer(LONG_DURATION, mTimerListener);
+
+        assertNotEquals(TimerInterface.INVALID_TID, tid);
+
+        mContextFixture.setSystemService(Context.ALARM_SERVICE, null);
+        mTimerAgent.stopTimer(tid);
+
+        verify(mAlarmManager, never()).cancel(any(PendingIntent.class));
+    }
+
+    @Test
+    @SmallTest
+    public void testStartAndStopNativeTimerWithShortDuration() {
+        boolean result = mTimerAgent.startNativeTimer(NATIVE_TIMER_ID, SHORT_DURATION);
+
+        assertTrue(result);
+
+        mTimerAgent.stopNativeTimer(NATIVE_TIMER_ID);
+
+        verify(mAlarmManager, never()).setExactAndAllowWhileIdle(
+                eq(AlarmManager.ELAPSED_REALTIME_WAKEUP), anyLong(), any(PendingIntent.class));
+        verify(mAlarmManager, never()).cancel(any(PendingIntent.class));
+    }
+
+    @Test
+    @SmallTest
+    public void testStartAndStopNativeTimerWithLongDuration() {
+        boolean result = mTimerAgent.startNativeTimer(NATIVE_TIMER_ID, LONG_DURATION);
+
+        assertTrue(result);
+
+        mTimerAgent.stopNativeTimer(NATIVE_TIMER_ID);
+
+        verify(mAlarmManager).setExactAndAllowWhileIdle(
+                eq(AlarmManager.ELAPSED_REALTIME_WAKEUP), anyLong(), any(PendingIntent.class));
+        verify(mAlarmManager).cancel(any(PendingIntent.class));
+    }
+
+    @Test
+    @SmallTest
+    public void testStartNativeTimerWithInvalidTid() {
+        boolean result = mTimerAgent.startNativeTimer(0, SHORT_DURATION);
+
+        assertFalse(result);
+    }
+
+    @Test
+    @SmallTest
+    public void testStartNativeTimerWhenAlarmManagerNull() {
+        mContextFixture.setSystemService(Context.ALARM_SERVICE, null);
+        boolean result = mTimerAgent.startNativeTimer(NATIVE_TIMER_ID, LONG_DURATION);
+
+        assertFalse(result);
+    }
+
+    @Test
+    @SmallTest
+    public void testStopNativeTimerWithInvalidTid() {
+        mTimerAgent.stopNativeTimer(TimerInterface.INVALID_TID);
+
+        verify(mAlarmManager, never()).cancel(any(PendingIntent.class));
+    }
+
+    @Test
+    @SmallTest
+    public void testStopNativeTimerWhenAlarmManagerNull() {
+        boolean result = mTimerAgent.startNativeTimer(NATIVE_TIMER_ID, LONG_DURATION);
+
+        assertTrue(result);
+
+        mContextFixture.setSystemService(Context.ALARM_SERVICE, null);
+        mTimerAgent.stopNativeTimer(NATIVE_TIMER_ID);
+
+        verify(mAlarmManager, never()).cancel(any(PendingIntent.class));
+    }
+
+    @Test
+    @SmallTest
+    public void testNotifyTimerExpiredForShortDuration() {
+        long tid = mTimerAgent.startTimer(SHORT_DURATION, mTimerListener);
+        processAllMessagesForTimerLooper(SHORT_DURATION + 10);
+        processAllMessages();
+
+        verify(mWakeLock).acquire(anyInt());
+        verify(mTimerListener).onTimerExpired(eq(tid));
+    }
+
+    @Test
+    @SmallTest
+    public void testNotifyTimerExpiredForLongDuration() {
+        long tid = mTimerAgent.startTimer(LONG_DURATION, mTimerListener);
+        mTimerBroadcastReceiver.onReceive(mTestAppContext.getContext(),
+                TimerAgent.createIntent(tid, false, false));
+        processAllMessages();
+
+        verify(mWakeLock).acquire(anyInt());
+        verify(mTimerListener).onTimerExpired(eq(tid));
+    }
+
+    @Test
+    @SmallTest
+    public void testNotifyNativeTimerExpiredForShortDuration() {
+        boolean result = mTimerAgent.startNativeTimer(NATIVE_TIMER_ID, SHORT_DURATION);
+        processAllMessagesForTimerLooper(SHORT_DURATION + 10);
+
+        assertTrue(result);
+        verify(mWakeLock).acquire(anyInt());
+        verify(mSystemInterface).notifyTimerExpired(eq(NATIVE_TIMER_ID));
+    }
+
+    @Test
+    @SmallTest
+    public void testNotifyNativeTimerExpiredForLongDuration() {
+        boolean result = mTimerAgent.startNativeTimer(NATIVE_TIMER_ID, LONG_DURATION);
+        mTimerBroadcastReceiver.onReceive(mTestAppContext.getContext(),
+                TimerAgent.createIntent(NATIVE_TIMER_ID, true, false));
+
+        assertTrue(result);
+        verify(mWakeLock).acquire(anyInt());
+        verify(mSystemInterface).notifyTimerExpired(eq(NATIVE_TIMER_ID));
+    }
+
+    private void processAllMessages() {
+        while (!mMainLooper.getLooper().getQueue().isIdle()) {
+            mMainLooper.processAllMessages();
+        }
+    }
+
+    private void processAllMessagesForTimerLooper(long moveTimeMillis) {
+        if (moveTimeMillis > 0) {
+            mTimerLooper.moveTimeForward(moveTimeMillis);
+        }
+        while (!mTimerLooper.getLooper().getQueue().isIdle()) {
+            mTimerLooper.processAllMessages();
+        }
+    }
+}

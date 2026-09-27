@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <int name="ims.request_uri_type_int" value="1" />
+    <int name="ims.sip_timer_f_millis_int" value="128000" />
+    <int name="ims.sip_timer_t1_millis_int" value="2000" />
+    <int name="ims.sip_timer_t4_millis_int" value="20000" />
+    <pbundle_as_map name="imsvoice.audio_codec_capability_payload_types_bundle">
+        <int-array name="imsvoice.amrnb_payload_type_int_array" num="1">
+            <item value="102" />
+        </int-array>
+        <int-array name="imsvoice.amrwb_payload_type_int_array" num="1">
+            <item value="104" />
+        </int-array>
+        <int-array name="imsvoice.dtmfnb_payload_type_int_array" num="1">
+            <item value="97" />
+        </int-array>
+        <int-array name="imsvoice.dtmfwb_payload_type_int_array" num="1">
+            <item value="96" />
+        </int-array>
+    </pbundle_as_map>
+    <string name="imsvoice.conference_factory_uri_string">conf-factory@ims.mnc002.mcc238.3gppnetwork.org</string>
+    <int name="imsvoice.ringback_timer_millis_int" value="120000" />
+    <int name="imsvoice.ringing_timer_millis_int" value="120000" />
+</carrier_config>

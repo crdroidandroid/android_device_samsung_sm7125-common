@@ -1,0 +1,175 @@
+/*
+ * Copyright (C) 2022 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "IMessage.h"
+#include "ISipHeader.h"
+#include "ServiceTrace.h"
+#include "SipMethod.h"
+#include "call/IMtcCall.h"
+#include "call/IMtcCallContext.h"
+#include "call/IMtcSession.h"
+#include "call/extension/MtcExtension.h"
+#include "call/extension/MtcExtensionSet.h"
+#include "call/extension/PreconditionExtension.h"
+#include "media/IMtcMediaManager.h"
+#include "precondition/IMtcPreconditionManager.h"
+#include "utility/IMessageUtils.h"
+
+__IMS_TRACE_TAG_COM_MTC__;
+
+PUBLIC
+PreconditionExtension::PreconditionExtension(IN IMtcCallContext& objContext) :
+        MtcExtension(objContext, MtcExtensionSet::OPTION_TAG_PRECONDITION,
+                {RequestType::START, RequestType::EARLY_UPDATE, RequestType::PRACK,
+                        RequestType::UPDATE},
+                {ResponseType::PROVISIONAL_RESPONSE})
+{
+}
+
+PUBLIC
+PreconditionExtension::PreconditionExtension(IN const PreconditionExtension& objRhs) :
+        MtcExtension(objRhs)
+{
+}
+
+PUBLIC VIRTUAL PreconditionExtension::~PreconditionExtension() {}
+
+PUBLIC VIRTUAL IMtcExtension* PreconditionExtension::Clone() const
+{
+    return new PreconditionExtension(*this);
+}
+
+PUBLIC VIRTUAL void PreconditionExtension::FormatRequest(
+        IN RequestType eType, IN_OUT IMessage& objRequest)
+{
+    if (eType != RequestType::START && !IsAvailableOnRemote())
+    {
+        return;
+    }
+
+    // Based on the 3GPP 24.229, a "precondition" option-tag is only considered when a request has
+    // SDP. So, SDP is not ready to be sent(not STATE_OFFER_SENT), does nothing.
+    // Also, technically, a PRACK can be sent with SDP answer when receiving a 183 with SDP offer
+    // and an ACK can be sent with SDP answer. However, We are not considering that cases because
+    // an INVITE that is sent from the AP IMS always has SDP offer.
+    if (!IsRequestIncludingOffer())
+    {
+        return;
+    }
+
+    IMS_SINT32 eHeaderType = ISipHeader::SUPPORTED;
+    switch (eType)
+    {
+        case RequestType::START:
+        case RequestType::UPDATE:
+            break;
+
+        case RequestType::EARLY_UPDATE:
+            if (m_objContext.GetCall().GetState() == IMtcCall::State::UPDATING)
+            {
+                break;
+            }
+            eHeaderType = ISipHeader::REQUIRE;
+            break;
+
+        case RequestType::PRACK:
+        case RequestType::ACK:
+            eHeaderType = ISipHeader::REQUIRE;
+            break;
+
+        case RequestType::CANCEL_UPDATE:
+        case RequestType::TERMINATE:
+            return;
+    }
+
+    m_objContext.GetMessageUtils().AddValueIfNotExists(&objRequest, GetOptionTag(), eHeaderType);
+}
+
+PUBLIC VIRTUAL void PreconditionExtension::FormatResponse(
+        IN ResponseType eType, IN_OUT IMessage& objResponse)
+{
+    if (!IsAvailableOnRemote())
+    {
+        return;
+    }
+    if (eType == ResponseType::REJECT)
+    {
+        return;
+    }
+
+    m_objContext.GetMessageUtils().AddValueIfNotExists(
+            &objResponse, GetOptionTag(), ISipHeader::REQUIRE);
+}
+
+PUBLIC VIRTUAL void PreconditionExtension::HandleRequest(
+        IN RequestType eType, IN const IMessage& objRequest)
+{
+    if (!IsSupportedType(eType))
+    {
+        return;
+    }
+
+    UpdateFromRequireAndSupportedHeader(objRequest, eType == RequestType::START);
+}
+
+PUBLIC VIRTUAL void PreconditionExtension::HandleResponse(
+        IN ResponseType eType, IN const IMessage& objResponse)
+{
+    if (!IsSupportedType(eType))
+    {
+        return;
+    }
+
+    UpdateFromRequireAndSupportedHeader(objResponse, IMS_FALSE);
+}
+
+PRIVATE
+void PreconditionExtension::UpdateFromRequireAndSupportedHeader(
+        IN const IMessage& objMessage, IN IMS_BOOL bTypeStart)
+{
+    if (!bTypeStart && !m_objContext.GetMessageUtils().HasSdp(&objMessage))
+    {
+        IMS_TRACE_D("UpdateFromRequireAndSupportedHeader : No SDP.", 0, 0, 0);
+        return;
+    }
+
+    if (bTypeStart || m_bRequiredOnRemote || HasPreconditionAttribute())
+    {
+        m_bRequiredOnRemote = m_objContext.GetMessageUtils().ContainsValueIgnoreCase(
+                &objMessage, GetOptionTag(), ISipHeader::REQUIRE);
+    }
+
+    if (bTypeStart || m_bSupportedOnRemote || HasPreconditionAttribute())
+    {
+        m_bSupportedOnRemote = m_objContext.GetMessageUtils().ContainsValueIgnoreCase(
+                &objMessage, GetOptionTag(), ISipHeader::SUPPORTED);
+    }
+
+    IMS_TRACE_D("UpdateFromRequireAndSupportedHeader : Tag[precondition] Require[%s] Supported[%s]",
+            _TRACE_B_(m_bRequiredOnRemote), _TRACE_B_(m_bSupportedOnRemote), 0);
+}
+
+PRIVATE IMS_BOOL PreconditionExtension::IsRequestIncludingOffer() const
+{
+    return m_objContext.GetMediaManager().GetNegotiationState(
+                   &m_objContext.GetSession()->GetISession()) == NegotiationState::STATE_OFFER_SENT;
+}
+
+PRIVATE IMS_BOOL PreconditionExtension::HasPreconditionAttribute() const
+{
+    return m_objContext.GetPreconditionManager().IsPreconditionIncludedInSdp(
+            &m_objContext.GetSession()->GetISession());
+}

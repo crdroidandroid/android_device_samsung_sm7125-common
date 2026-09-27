@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <string name="imsss.ut_as_server_fqdn_string">xcap.ims.mnc005.mcc206.pub.3gppnetwork.org</string>
+    <int name="imsss.ut_iptype_home_int" value="0" />
+    <boolean name="imsss.ut_requires_ims_registration_bool" value="true" />
+    <boolean name="imsss.ut_supported_when_roaming_bool" value="false" />
+</carrier_config>

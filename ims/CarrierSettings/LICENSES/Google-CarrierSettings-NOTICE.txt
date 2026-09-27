@@ -1,0 +1,10 @@
+Google CarrierSettings data
+
+The XML files under assets/carrier_settings are a filtered transformation of
+Google CarrierSettings protobuf data. SOURCE.md describes the data's origin and
+schema; carrier_settings_source.json records input and output hashes.
+
+The imported source data was not accompanied by a separate data license. This
+notice records provenance and does not grant a new license or relicense the
+data under the Apache-2.0 license of the conversion tools and protobuf schemas.
+Soong records these data assets using its legacy_proprietary license kind.

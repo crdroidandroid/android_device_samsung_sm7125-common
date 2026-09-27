@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <int name="ims.sip_timer_t4_millis_int" value="20000" />
+    <string name="imsss.ut_as_server_fqdn_string">ap.ims.mnc005.mcc244.pub.3gppnetwork.org</string>
+    <int name="imsss.ut_as_server_port_int" value="9002" />
+    <int-array name="imsss.ut_server_based_services_int_array" num="19">
+        <item value="12" />
+        <item value="18" />
+        <item value="14" />
+        <item value="19" />
+        <item value="21" />
+        <item value="15" />
+        <item value="16" />
+        <item value="17" />
+        <item value="13" />
+        <item value="1" />
+        <item value="3" />
+        <item value="4" />
+        <item value="7" />
+        <item value="6" />
+        <item value="5" />
+        <item value="2" />
+        <item value="8" />
+        <item value="9" />
+        <item value="11" />
+    </int-array>
+    <string name="imsvoice.conference_factory_uri_string">7888@ims.mnc005.mcc244.3gppnetwork.org</string>
+</carrier_config>

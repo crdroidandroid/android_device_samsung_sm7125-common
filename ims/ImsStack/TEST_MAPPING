@@ -1,0 +1,130 @@
+{
+    // For presubmit test group.
+    "presubmit": [
+        {
+            "name": "ImsStackJavaTests_sm7125",
+            "options": [
+                {
+                    "exclude-annotation": "androidx.test.filters.LargeTest"
+                },
+                {
+                    "exclude-annotation": "androidx.test.filters.FlakyTest"
+                }
+            ]
+        },
+        {
+            "name": "ImsStackNativeTests_sm7125"
+        }
+    ],
+
+    // For postsubmit test group.
+    "postsubmit": [
+        {
+            "name": "ImsStackJavaTests_sm7125"
+        },
+        {
+            "name": "ImsStackNativeTests_sm7125"
+        }
+    ],
+
+    // ImsStack all unit tests.
+    "ImsStack-all": [
+        {
+            "name": "ImsStackJavaTests_sm7125"
+        },
+        {
+            "name": "ImsStackNativeTests_sm7125"
+        }
+    ],
+
+    // ImsStack java unit tests.
+    "ImsStack-java": [
+        {
+            "name": "ImsStackJavaTests_sm7125"
+        }
+    ],
+
+    // ImsStack java unit tests excluding "LargeTest" annotation.
+    "ImsStack-java-exclude-largetest": [
+        {
+            "name": "ImsStackJavaTests_sm7125",
+            "options": [
+                {
+                    "exclude-annotation": "androidx.test.filters.LargeTest"
+                }
+            ]
+        }
+    ],
+
+    // ImsStack native unit tests.
+    "ImsStack-native": [
+        {
+            "name": "ImsStackNativeTests_sm7125"
+        }
+    ],
+
+    // ImsStack native unit tests for MmTel feature.
+    "ImsStack-native-mmtel": [
+        {
+            "name": "ImsStackNativeConfigTests_sm7125"
+        },
+        {
+            "name": "ImsStackNativeEnablerTests_sm7125"
+        },
+        {
+            "name": "ImsStackNativeEngineTests_sm7125"
+        },
+        {
+            "name": "ImsStackNativeJniTests_sm7125"
+        },
+        {
+            "name": "ImsStackNativeMainTests_sm7125"
+        },
+        {
+            "name": "ImsStackNativePlatformTests_sm7125"
+        },
+        {
+            "name": "ImsStackNativeProtocolTests_sm7125"
+        },
+
+        // protocol
+        {
+            "name": "ImsStackNativeProtocolSdpTests_sm7125"
+        },
+        {
+            "name": "ImsStackNativeProtocolSipTests_sm7125"
+        },
+
+        // enabler
+        {
+            "name": "ImsStackNativeEnablerAosTests_sm7125"
+        },
+        {
+            "name": "ImsStackNativeEnablerMediaTests_sm7125"
+        },
+        {
+            "name": "ImsStackNativeEnablerMtcTests_sm7125"
+        },
+        {
+            "name": "ImsStackNativeEnablerMtsTests_sm7125"
+        }
+    ],
+
+    // For tiss-presubmit test group
+    "tiss-presubmit": [
+        {
+            "name": "ImsStackPresubmitTest_sm7125",
+            "options": [
+                {
+                    "include-filter": "com.android.imsstack.its.tests"
+                },
+                {
+                    "include-annotation": "android.platform.test.annotations.Presubmit"
+                },
+                {
+                    "instrumentation-arg": "use_scm:=true"
+                }
+            ]
+        }
+    ]
+}

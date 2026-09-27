@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <int-array name="ims.ipsec_encryption_algorithms_int_array" num="1">
+        <item value="0" />
+    </int-array>
+    <int name="ims.ipv4_sip_mtu_size_cellular_int" value="1300" />
+    <int name="ims.ipv6_sip_mtu_size_cellular_int" value="1300" />
+    <pbundle_as_map name="imsvoice.audio_codec_capability_payload_types_bundle">
+        <int-array name="imsvoice.amrnb_payload_type_int_array" num="1">
+            <item value="102" />
+        </int-array>
+        <int-array name="imsvoice.amrwb_payload_type_int_array" num="1">
+            <item value="104" />
+        </int-array>
+        <int-array name="imsvoice.dtmfnb_payload_type_int_array" num="1">
+            <item value="97" />
+        </int-array>
+        <int-array name="imsvoice.dtmfwb_payload_type_int_array" num="1">
+            <item value="96" />
+        </int-array>
+    </pbundle_as_map>
+    <string name="imsvoice.conference_factory_uri_string">mmtel@conf-factory.ims.mnc027.mcc208.3gppnetwork.org</string>
+    <int name="imsvoice.conference_subscribe_type_int" value="0" />
+</carrier_config>

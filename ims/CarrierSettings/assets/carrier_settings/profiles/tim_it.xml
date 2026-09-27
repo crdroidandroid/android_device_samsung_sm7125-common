@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <int name="ims.ipv4_sip_mtu_size_cellular_int" value="1300" />
+    <int name="ims.ipv6_sip_mtu_size_cellular_int" value="1300" />
+    <int name="imsss.ut_as_server_port_int" value="8080" />
+    <pbundle_as_map name="imsvoice.audio_codec_capability_payload_types_bundle">
+        <int-array name="imsvoice.amrnb_payload_type_int_array" num="1">
+            <item value="102" />
+        </int-array>
+        <int-array name="imsvoice.amrwb_payload_type_int_array" num="1">
+            <item value="104" />
+        </int-array>
+        <int-array name="imsvoice.dtmfnb_payload_type_int_array" num="1">
+            <item value="97" />
+        </int-array>
+        <int-array name="imsvoice.dtmfwb_payload_type_int_array" num="1">
+            <item value="96" />
+        </int-array>
+    </pbundle_as_map>
+    <int name="imsvoice.conference_subscribe_type_int" value="0" />
+    <int name="imsvoice.minimum_session_expires_timer_sec_int" value="600" />
+    <int name="imsvoice.ringback_timer_millis_int" value="60000" />
+    <int name="imsvoice.ringing_timer_millis_int" value="60000" />
+</carrier_config>

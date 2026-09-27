@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <string name="ims.ims_user_agent_string">Telstra #MANUFACTURE# #HWSKU# Android#AV# #BUILD#</string>
+</carrier_config>

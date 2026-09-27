@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <string name="ims.ims_user_agent_string">#MANUFACTURE# #MODEL# Android #BUILD#</string>
+    <int name="ims.sip_timer_f_millis_int" value="32000" />
+    <int name="ims.sip_timer_j_millis_int" value="32000" />
+    <int name="imsvoice.minimum_session_expires_timer_sec_int" value="1800" />
+    <boolean name="imsvoice.prack_supported_for_18x_bool" value="true" />
+    <int name="imsvoice.ringing_timer_millis_int" value="45000" />
+    <int name="imsvoice.session_expires_timer_sec_int" value="3600" />
+    <int name="imsvoice.session_privacy_type_int" value="2" />
+</carrier_config>

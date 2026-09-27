@@ -1,0 +1,48 @@
+/*
+ * Copyright (C) 2022 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+#ifndef AOS_RETRYREPOSITORY_H_
+#define AOS_RETRYREPOSITORY_H_
+
+#include "interface/IAosRetryRepository.h"
+
+/**
+ * @brief This class manages shared retry counter for the specific error for registration
+ */
+
+class AosRetryRepository : public IAosRetryRepository
+{
+public:
+    explicit AosRetryRepository(IN IMS_SINT32 nSlotId);
+    ~AosRetryRepository() override;
+
+    enum
+    {
+        TYPE_NORMAL = 0,
+        TYPE_EMERGENCY
+    };
+
+    IMS_BOOL IncreaseRetryCount(IN IMS_UINT32 nType = TYPE_NORMAL) override;
+    void ResetRetryCount(IN IMS_UINT32 nType = TYPE_NORMAL) override;
+
+protected:
+    IMS_SINT32 m_nRetryCount;
+    IMS_SINT32 m_nEmergencyRetryCount;
+
+private:
+    IMS_SINT32 m_nSlotId;
+    AString m_strTag;
+};
+#endif  // AOS_RETRYREPOSITORY_H_

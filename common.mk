@@ -458,16 +458,15 @@ PRODUCT_SOONG_NAMESPACES += \
     hardware/google/pixel/pixelstats \
     hardware/google/pixel/power-libperfmgr \
     hardware/google/pixel/thermal \
-    hardware/samsung \
-    vendor/lineage/imsstack-carrier-config-ext
+    hardware/samsung
 
 # Userspace IMS and its framework bearer services
-$(call inherit-product, packages/modules/ImsMedia/imsmedia.mk)
-$(call inherit-product, packages/apps/CarrierSettings/carrier_settings.mk)
+$(call inherit-product, $(LOCAL_PATH)/ims/ImsMedia/imsmedia.mk)
+$(call inherit-product, $(LOCAL_PATH)/ims/CarrierSettings/carrier_settings.mk)
 
 PRODUCT_PACKAGES += \
     CarrierConfigResCommon \
-    ImsStack \
+    ImsStack_sm7125 \
     ImsStackOverlay \
     Iwlan \
     QualifiedNetworksService

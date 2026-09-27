@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <string name="ims.ims_user_agent_string">#MANUFACTURE# - #MODEL# - #BUILD#</string>
+    <int name="imsvoice.mo_call_request_timeout_millis_int" value="0" />
+</carrier_config>

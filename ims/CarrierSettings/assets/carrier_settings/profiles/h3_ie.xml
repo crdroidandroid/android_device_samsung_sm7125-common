@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <int name="ims.registration_expiry_timer_sec_int" value="36000" />
+    <string name="imsss.ut_as_server_fqdn_string">xcap.three.ie</string>
+    <int name="imsss.ut_as_server_port_int" value="80" />
+    <int name="imsss.ut_iptype_roaming_int" value="0" />
+    <boolean name="imsss.ut_requires_ims_registration_bool" value="true" />
+    <int name="imsvoice.minimum_session_expires_timer_sec_int" value="600" />
+</carrier_config>

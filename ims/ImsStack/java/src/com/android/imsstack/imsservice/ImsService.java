@@ -1,0 +1,252 @@
+/*
+ * Copyright (C) 2022 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.android.imsstack.imsservice;
+
+import android.annotation.Nullable;
+import android.telephony.ims.feature.ImsFeature;
+import android.telephony.ims.feature.MmTelFeature;
+import android.telephony.ims.feature.RcsFeature;
+import android.telephony.ims.stub.ImsConfigImplBase;
+import android.telephony.ims.stub.ImsFeatureConfiguration;
+import android.telephony.ims.stub.ImsRegistrationImplBase;
+import android.telephony.ims.stub.SipTransportImplBase;
+
+import com.android.imsstack.R;
+import com.android.imsstack.base.DeviceConfig;
+import com.android.imsstack.core.agents.AgentFactory;
+import com.android.imsstack.core.agents.dcm.DcFactory;
+import com.android.imsstack.imsservice.mmtel.ImsServiceManager;
+import com.android.imsstack.imsservice.mmtel.ImsServiceRecord;
+import com.android.imsstack.internal.imsservice.MmTelFeatureRegistry;
+import com.android.imsstack.util.Log;
+import com.android.internal.annotations.VisibleForTesting;
+
+import java.io.FileDescriptor;
+import java.io.PrintWriter;
+import java.util.concurrent.Executor;
+
+/**
+ * Implements ImsService to provide VoLTE/Emergency/RCS features.
+ */
+public class ImsService extends android.telephony.ims.ImsService {
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+
+        logi(this, "onCreate");
+
+        ImsServiceController.create(getApplicationContext());
+    }
+
+    @Override
+    public void onDestroy() {
+        logi(this, "onDestroy");
+
+        ImsServiceController.destroy(getApplicationContext());
+
+        super.onDestroy();
+    }
+
+    /** This method is added to read ImsController is ready or not
+     *  Override this method to get ImsController ready state in testing class
+     *  @return  True if ImsController is ready otherwise false
+     */
+    @VisibleForTesting
+    protected boolean isImsControllerReady() {
+        return ImsServiceController.isReady();
+    }
+
+    @Override
+    public ImsFeatureConfiguration querySupportedImsFeatures() {
+        if (!isImsControllerReady()) {
+            logi(this, "querySupportedImsFeatures: not-ready");
+            return super.querySupportedImsFeatures();
+        }
+
+        logi(this, "querySupportedImsFeatures");
+
+        // It will return the supported features by this ImsService.
+        // Generally, the features are the same as defined in AndroidManifest.xml.
+        ImsFeatureConfiguration.Builder fcBuilder = new ImsFeatureConfiguration.Builder();
+        int simCount = DeviceConfig.getActiveSimCount();
+        boolean emergencyMmTelEnabled = getResources().getBoolean(
+                R.bool.config_imsstack_emergency_mmtel_feature);
+        boolean rcsEnabled = getResources().getBoolean(
+                R.bool.config_imsstack_rcs_feature);
+
+        for (int i = 0; i < simCount; i++) {
+            fcBuilder.addFeature(i, ImsFeature.FEATURE_MMTEL);
+            if (emergencyMmTelEnabled) {
+                fcBuilder.addFeature(i, ImsFeature.FEATURE_EMERGENCY_MMTEL);
+            }
+            if (rcsEnabled) {
+                fcBuilder.addFeature(i, ImsFeature.FEATURE_RCS);
+            }
+        }
+
+        return fcBuilder.build();
+    }
+
+    @Override
+    public @ImsServiceCapability long getImsServiceCapabilities() {
+        //TODO uncomment below statements for SIP Delegate Support.
+        //logi("getImsServiceCapabilities:CAPABILITY_SIP_DELEGATE_CREATION");
+        //return CAPABILITY_SIP_DELEGATE_CREATION;
+        logi(this, "getImsServiceCapabilities");
+        return (super.getImsServiceCapabilities()
+                | MmTelFeatureRegistry.getTerminalBasedServiceCapabilities()
+                | MmTelFeatureRegistry.getSimultaneousCallingCapabilities());
+    }
+
+    @Override
+    public void readyForFeatureCreation() {
+        logi(this, "readyForFeatureCreation");
+    }
+
+    @Override
+    public void enableIms(int slotId) {
+        if (!ImsServiceController.isReady()) {
+            logi(this, "enableIms: not-ready, slotId=" + slotId);
+            return;
+        }
+
+        logi(this, "enableIms: slotId=" + slotId);
+
+        ImsServiceRecord isr = ImsServiceManager.getServiceRecord(slotId);
+
+        if (isr != null) {
+            isr.enableIms();
+        }
+    }
+
+    @Override
+    public void disableIms(int slotId) {
+        if (!ImsServiceController.isReady()) {
+            logi(this, "disableIms: not-ready, slotId=" + slotId);
+            return;
+        }
+
+        logi(this, "disableIms: slotId=" + slotId);
+
+        ImsServiceRecord isr = ImsServiceManager.getServiceRecord(slotId);
+
+        if (isr != null) {
+            isr.disableIms();
+        }
+    }
+
+    @Override
+    public MmTelFeature createMmTelFeature(int slotId) {
+        logi(this, "createMmTelFeature: slotId=" + slotId);
+
+        ImsServiceController isc = ImsServiceController.getInstance();
+
+        if (isc == null) {
+            logi(this, "No ISC");
+            return null;
+        }
+
+        return isc.getMmTelService(slotId);
+    }
+
+    @Override
+    public RcsFeature createRcsFeature(int slotId) {
+        logi(this, "createRcsFeature for slot" + slotId);
+
+        ImsServiceController isc = ImsServiceController.getInstance();
+
+        if (isc == null) {
+            logi(this, "No ISC");
+            return null;
+        }
+
+        return isc.getRcsFeature(slotId);
+    }
+
+    @Override
+    public ImsConfigImplBase getConfig(int slotId) {
+        if (!ImsServiceController.isReady()) {
+            logi(this, "getConfig: not-ready, slotId=" + slotId);
+            return null;
+        }
+
+        ImsServiceRecord isr = ImsServiceManager.getServiceRecord(slotId);
+
+        if (isr == null) {
+            logi(this, "getConfig: Service is down for phone" + slotId);
+            return null;
+        }
+
+        return isr.getConfig();
+    }
+
+    @Override
+    public ImsRegistrationImplBase getRegistration(int slotId) {
+        if (!ImsServiceController.isReady()) {
+            logi(this, "getRegistration: not-ready, slotId=" + slotId);
+            return null;
+        }
+
+        ImsServiceRecord isr = ImsServiceManager.getServiceRecord(slotId);
+
+        if (isr == null) {
+            logi(this, "getRegistration: Service is down for phone" + slotId);
+            return null;
+        }
+
+        return isr.getRegistration();
+    }
+
+    @Override
+    public @Nullable SipTransportImplBase getSipTransport(int slotId) {
+        logi(this, "getSipTransport: slotId=" + slotId + ", not-support");
+        return null;
+    }
+
+    @Override
+    public Executor getExecutor() {
+        Executor executor = ImsServiceController.getInstance().getExecutor();
+        return (executor != null) ? executor : Runnable::run;
+    }
+
+    @Override
+    public void dump(FileDescriptor fd, PrintWriter printWriter, String[] args) {
+        printWriter.println("supportedSimCount=" + DeviceConfig.getSupportedSimCount());
+        printWriter.println("activeSimCount=" + DeviceConfig.getActiveSimCount());
+        printWriter.println();
+
+        printWriter.println("### IMS Services");
+        ImsServiceController isc = ImsServiceController.getInstance();
+        if (isc != null) {
+            isc.dump(printWriter);
+        }
+        printWriter.println();
+
+        printWriter.println("### Data Networks");
+        DcFactory.dump(printWriter);
+        printWriter.println();
+
+        printWriter.println("### Core Agents");
+        AgentFactory.getInstance().dump(printWriter);
+        printWriter.println();
+    }
+
+    private static void logi(Object o, String s) {
+        Log.i(o, "[ISIL] " + s);
+    }
+}

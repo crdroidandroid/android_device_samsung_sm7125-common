@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <string name="ims.ims_user_agent_string">#MANUFACTURE# #MODEL#/AMX MEX</string>
+    <int name="ims.request_uri_type_int" value="1" />
+    <boolean name="imsss.ut_requires_ims_registration_bool" value="true" />
+</carrier_config>

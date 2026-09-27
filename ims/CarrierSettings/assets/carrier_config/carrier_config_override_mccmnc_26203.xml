@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!-- SPDX-License-Identifier: GPL-2.0-only -->
+<!-- Trace-validated carrier override; maintained in-tree. -->
+<carrier_config_list>
+    <!-- Telefonica DE / O2 DE -->
+    <carrier_config>
+        <boolean name="imswfc.use_mo_call_request_timeout_timer_bool" value="false" />
+    </carrier_config>
+</carrier_config_list>

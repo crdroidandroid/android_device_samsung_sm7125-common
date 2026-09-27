@@ -1,0 +1,2155 @@
+/*
+ * Copyright (C) 2022 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "CallReasonInfo.h"
+#include "Engine.h"
+#include "IConfiguration.h"
+#include "ISipHeader.h"
+#include "ImsAosParameter.h"
+#include "MediaDef.h"
+#include "MockIMessage.h"
+#include "MockIMtcCallController.h"
+#include "MockIMtcService.h"
+#include "MockISession.h"
+#include "MockISipMessage.h"
+#include "PlatformContext.h"
+#include "SipMethod.h"
+#include "SipStatusCode.h"
+#include "TestConfigService.h"
+#include "call/IMtcCall.h"
+#include "call/MockIMtcCall.h"
+#include "call/MockIMtcCallContext.h"
+#include "call/MockIMtcCallManager.h"
+#include "call/MtcSession.h"
+#include "call/extension/MtcExtensionSet.h"
+#include "call/message/MockIMessageSender.h"
+#include "conferencecall/MockIConferenceController.h"
+#include "conferencecall/MockIConferenceManager.h"
+#include "configuration/ConfigDef.h"
+#include "configuration/MockMtcConfigurationProxy.h"
+#include "configuration/MtcConfigurationProxy.h"
+#include "helper/MockIMtcAosConnector.h"
+#include "helper/sipinterfaceholder/MockIMtcSipInterfaceFactory.h"
+#include "helper/sipinterfaceholder/MockSessionInterfaceHolder.h"
+#include "media/IMtcMediaManager.h"
+#include "media/MockIMtcMediaManager.h"
+#include "precondition/MockIMtcPreconditionManager.h"
+#include "utility/MessageUtil.h"
+#include "utility/MockIMessageUtils.h"
+#include <gtest/gtest.h>
+
+using ::testing::_;
+using ::testing::Invoke;
+using ::testing::Return;
+using ::testing::ReturnRef;
+
+LOCAL const CallKey CALL_KEY = 1;
+
+class MtcSessionTest : public ::testing::Test
+{
+public:
+    MockIMtcCallContext objContext;
+    MockIMtcCallManager objCallManager;
+    MockIMtcCallController objCallController;
+    MockMtcConfigurationProxy* pConfigurationProxy;
+    MockIMtcPreconditionManager objPreconditionManager;
+    MockIMtcMediaManager objMediaManager;
+    MockISession objSession;
+    MockIMessage objMessage;
+    MockISipMessage objSipMessage;
+    MockIMessageSender* pMessageSender;
+    MockSessionInterfaceHolder* pSessionInterfaceHolder;
+    MockIMtcSipInterfaceFactory objSipInterfaceFactory;
+    MockIMtcService objMtcService;
+    MockIMessageUtils objMessageUtils;
+    MockIMtcAosConnector objAosConnector;
+    MockIMtcCall objThisCall;
+    TestConfigService objConfigService;
+    CallInfo objCallInfo;
+    MtcSession* pMtcSession;
+
+protected:
+    virtual void SetUp() override
+    {
+        PlatformContext::GetInstance()->SetService(
+                PlatformContext::SERVICE_CONFIG, &objConfigService);
+        Engine::GetConfiguration()->RefreshConfigs(IMS_SLOT_0);
+
+        ON_CALL(objContext, GetMediaManager).WillByDefault(ReturnRef(objMediaManager));
+        ON_CALL(objContext, GetCallManager).WillByDefault(ReturnRef(objCallManager));
+        ON_CALL(objContext, GetCallController).WillByDefault(ReturnRef(objCallController));
+        ON_CALL(objContext, GetPreconditionManager)
+                .WillByDefault(ReturnRef(objPreconditionManager));
+        ON_CALL(objContext, GetCallKey).WillByDefault(Return(CALL_KEY));
+
+        pConfigurationProxy = new MockMtcConfigurationProxy();
+        ON_CALL(objContext, GetConfigurationProxy).WillByDefault(ReturnRef(*pConfigurationProxy));
+
+        // To increase coverage
+        ON_CALL(*pConfigurationProxy,
+                GetBoolean(ConfigVoice::KEY_VOICE_QOS_PRECONDITION_SUPPORTED_BOOL))
+                .WillByDefault(Return(IMS_TRUE));
+        ON_CALL(*pConfigurationProxy,
+                GetInt(ConfigVoice::KEY_SESSION_REFRESH_TRIGGER_INTERVAL_SEC_INT))
+                .WillByDefault(Return(100));
+
+        ON_CALL(objContext, GetCallInfo).WillByDefault(ReturnRef(objCallInfo));
+
+        pSessionInterfaceHolder = new MockSessionInterfaceHolder();
+        ON_CALL(objSipInterfaceFactory, GetISessionHolder)
+                .WillByDefault(ReturnRef(*pSessionInterfaceHolder));
+        ON_CALL(objContext, GetSipInterfaceFactory)
+                .WillByDefault(ReturnRef(objSipInterfaceFactory));
+
+        ON_CALL(objContext, GetService).WillByDefault(ReturnRef(objMtcService));
+        ON_CALL(objContext, GetMessageUtils).WillByDefault(ReturnRef(objMessageUtils));
+        ON_CALL(objMessageUtils, AddValueIfNotExists(&objMessage, _, _, _))
+                .WillByDefault(Return(IMS_SUCCESS));
+
+        ON_CALL(objMtcService, GetAosConnector).WillByDefault(Return(&objAosConnector));
+
+        ON_CALL(objSession, GetNextRequest).WillByDefault(Return(&objMessage));
+        ON_CALL(objSession, GetNextResponse).WillByDefault(Return(&objMessage));
+
+        ON_CALL(objThisCall, GetState).WillByDefault(Return(IMtcCall::State::IDLE));
+        ON_CALL(objContext, GetCall).WillByDefault(ReturnRef(objThisCall));
+
+        ON_CALL(objMessage, GetMessage).WillByDefault(Return(&objSipMessage));
+
+        pMessageSender = new MockIMessageSender();
+        pMtcSession = IMS_NULL;
+    }
+
+    virtual void TearDown() override
+    {
+        PlatformContext::GetInstance()->SetService(PlatformContext::SERVICE_CONFIG, IMS_NULL);
+        delete pConfigurationProxy;
+        delete pMtcSession;
+        delete pSessionInterfaceHolder;
+    }
+
+    void CreateMtcSession()
+    {
+        CreateMtcSession(CallType::VOIP, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    }
+
+    void CreateMtcSession(IN CallType eCallType, IN PeerType ePeerType, IN IMS_BOOL bRegAudio,
+            IN IMS_BOOL bRegVideo, IN IMS_BOOL bRegText)
+    {
+        IMS_UINT32 nFeatures = 0x00000000;
+        nFeatures |= bRegAudio ? ImsAosFeature::MMTEL : 0;
+        nFeatures |= bRegVideo ? ImsAosFeature::VIDEO : 0;
+        nFeatures |= bRegText ? ImsAosFeature::TEXT : 0;
+        ON_CALL(objAosConnector, GetFeatures()).WillByDefault(Return(nFeatures));
+
+        objCallInfo.ePeerType = ePeerType;
+        pMtcSession = new MtcSession(objContext, objSession, eCallType, pMessageSender);
+        ON_CALL(objContext, GetSession()).WillByDefault(Return(pMtcSession));
+    }
+
+    void SetUpForSetSdp(IN NegotiationState eNegoState, IN IMS_RESULT eFormResult)
+    {
+        ON_CALL(objMediaManager, GetNegotiationState(_)).WillByDefault(Return(eNegoState));
+        ON_CALL(objMediaManager, FormSdp(&objSession, _, _)).WillByDefault(Return(eFormResult));
+        ON_CALL(objPreconditionManager, FormPreconditionSdp(&objSession, IMS_FALSE))
+                .WillByDefault(Return());
+    }
+
+    void DisableVideoTextCapabilityByRemoteMessage()
+    {
+        ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage))
+                .WillByDefault(Return(IMS_FALSE));
+        ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage))
+                .WillByDefault(Return(IMS_FALSE));
+        ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_FALSE));
+        ON_CALL(objMessageUtils, GetCallTypeFromSdp(_, _, _, _))
+                .WillByDefault(Return(CallType::VOIP));
+        pMtcSession->HandleRequest(RequestType::START, objMessage);
+    }
+};
+
+TEST_F(MtcSessionTest, CreateMtSessionInvokesAddISessionInSessionHolder)
+{
+    EXPECT_CALL(*pSessionInterfaceHolder, AddISession(CALL_KEY, &objSession));
+    CreateMtcSession(CallType::VOIP, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+}
+
+TEST_F(MtcSessionTest, ConstructorSetsPreviewModeWhenPolicyIsAllCalls)
+{
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_POLICY_FOR_SDP_PREVIEW_MODE_INT))
+            .WillByDefault(Return(ConfigVoice::SDP_PREVIEW_MODE_FOR_ALL_CALLS));
+    ON_CALL(objSession, GetConfiguration()).WillByDefault(Return(0));
+
+    objCallInfo.eEmergencyType = EmergencyType::NONE;
+    EXPECT_CALL(objSession, SetConfiguration(ISession::CONFIG_NOTIFY_100_TRYING_RESPONSE_RECEIVED));
+    EXPECT_CALL(objSession,
+            SetConfiguration(ISession::CONFIG_SUPPORT_PREVIEW |
+                    ISession::CONFIG_ALLOW_SDP_NEGOTIATION_ON_NON_RPR));
+    CreateMtcSession();
+
+    objCallInfo.eEmergencyType = EmergencyType::EMERGENCY_ROUTING;
+    EXPECT_CALL(objSession, SetConfiguration(ISession::CONFIG_NOTIFY_100_TRYING_RESPONSE_RECEIVED));
+    EXPECT_CALL(objSession,
+            SetConfiguration(ISession::CONFIG_SUPPORT_PREVIEW |
+                    ISession::CONFIG_ALLOW_SDP_NEGOTIATION_ON_NON_RPR));
+    CreateMtcSession();
+}
+
+TEST_F(MtcSessionTest, ConstructorDoesNotSetPreviewModeWhenPolicyIsDisabled)
+{
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_POLICY_FOR_SDP_PREVIEW_MODE_INT))
+            .WillByDefault(Return(ConfigVoice::SDP_PREVIEW_MODE_DISABLED));
+    ON_CALL(objSession, GetConfiguration()).WillByDefault(Return(0));
+
+    objCallInfo.eEmergencyType = EmergencyType::NONE;
+    EXPECT_CALL(objSession, SetConfiguration(ISession::CONFIG_NOTIFY_100_TRYING_RESPONSE_RECEIVED));
+    EXPECT_CALL(objSession,
+            SetConfiguration(ISession::CONFIG_SUPPORT_PREVIEW |
+                    ISession::CONFIG_ALLOW_SDP_NEGOTIATION_ON_NON_RPR))
+            .Times(0);
+    CreateMtcSession();
+
+    objCallInfo.eEmergencyType = EmergencyType::EMERGENCY_ROUTING;
+    EXPECT_CALL(objSession, SetConfiguration(ISession::CONFIG_NOTIFY_100_TRYING_RESPONSE_RECEIVED));
+    EXPECT_CALL(objSession,
+            SetConfiguration(ISession::CONFIG_SUPPORT_PREVIEW |
+                    ISession::CONFIG_ALLOW_SDP_NEGOTIATION_ON_NON_RPR))
+            .Times(0);
+    CreateMtcSession();
+}
+
+TEST_F(MtcSessionTest, ConstructorSetsPreviewModeWhenPolicyIsNormalOnlyAndCallIsNormal)
+{
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_POLICY_FOR_SDP_PREVIEW_MODE_INT))
+            .WillByDefault(Return(ConfigVoice::SDP_PREVIEW_MODE_FOR_NORMAL_CALL_ONLY));
+    ON_CALL(objSession, GetConfiguration()).WillByDefault(Return(0));
+
+    objCallInfo.eEmergencyType = EmergencyType::NONE;
+    EXPECT_CALL(objSession, SetConfiguration(ISession::CONFIG_NOTIFY_100_TRYING_RESPONSE_RECEIVED));
+    EXPECT_CALL(objSession,
+            SetConfiguration(ISession::CONFIG_SUPPORT_PREVIEW |
+                    ISession::CONFIG_ALLOW_SDP_NEGOTIATION_ON_NON_RPR));
+    CreateMtcSession();
+}
+
+TEST_F(MtcSessionTest, ConstructorDoesNotSetPreviewModeWhenPolicyIsNormalOnlyAndCallIsEmergency)
+{
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_POLICY_FOR_SDP_PREVIEW_MODE_INT))
+            .WillByDefault(Return(ConfigVoice::SDP_PREVIEW_MODE_FOR_NORMAL_CALL_ONLY));
+    ON_CALL(objSession, GetConfiguration()).WillByDefault(Return(0));
+
+    objCallInfo.eEmergencyType = EmergencyType::EMERGENCY_ROUTING;
+    EXPECT_CALL(objSession, SetConfiguration(ISession::CONFIG_NOTIFY_100_TRYING_RESPONSE_RECEIVED));
+    EXPECT_CALL(objSession,
+            SetConfiguration(ISession::CONFIG_SUPPORT_PREVIEW |
+                    ISession::CONFIG_ALLOW_SDP_NEGOTIATION_ON_NON_RPR))
+            .Times(0);
+    CreateMtcSession();
+}
+
+TEST_F(MtcSessionTest, ConstructorSetsPreviewModeWhenPolicyIsEmergencyOnlyAndCallIsEmergency)
+{
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_POLICY_FOR_SDP_PREVIEW_MODE_INT))
+            .WillByDefault(Return(ConfigVoice::SDP_PREVIEW_MODE_FOR_EMERGENCY_CALL_ONLY));
+    ON_CALL(objSession, GetConfiguration()).WillByDefault(Return(0));
+
+    objCallInfo.eEmergencyType = EmergencyType::EMERGENCY_ROUTING;
+    EXPECT_CALL(objSession, SetConfiguration(ISession::CONFIG_NOTIFY_100_TRYING_RESPONSE_RECEIVED));
+    EXPECT_CALL(objSession,
+            SetConfiguration(ISession::CONFIG_SUPPORT_PREVIEW |
+                    ISession::CONFIG_ALLOW_SDP_NEGOTIATION_ON_NON_RPR));
+    CreateMtcSession();
+}
+
+TEST_F(MtcSessionTest, ConstructorDoesNotSetPreviewModeWhenPolicyIsEmergencyOnlyAndCallIsNormal)
+{
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_POLICY_FOR_SDP_PREVIEW_MODE_INT))
+            .WillByDefault(Return(ConfigVoice::SDP_PREVIEW_MODE_FOR_EMERGENCY_CALL_ONLY));
+    ON_CALL(objSession, GetConfiguration()).WillByDefault(Return(0));
+
+    objCallInfo.eEmergencyType = EmergencyType::NONE;
+    EXPECT_CALL(objSession, SetConfiguration(ISession::CONFIG_NOTIFY_100_TRYING_RESPONSE_RECEIVED));
+    EXPECT_CALL(objSession,
+            SetConfiguration(ISession::CONFIG_SUPPORT_PREVIEW |
+                    ISession::CONFIG_ALLOW_SDP_NEGOTIATION_ON_NON_RPR))
+            .Times(0);
+    CreateMtcSession();
+}
+
+TEST_F(MtcSessionTest, DestructorDestroysMediaProfileAndQosInfo)
+{
+    CreateMtcSession(CallType::VOIP, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+
+    EXPECT_CALL(objMediaManager, DestroyMediaForSession(_));
+    EXPECT_CALL(objPreconditionManager, DestroyQos(_));
+
+    // Trigger the destructor
+    delete pMtcSession;
+    pMtcSession = IMS_NULL;
+}
+
+TEST_F(MtcSessionTest, StartInvokesStartInMessageSender)
+{
+    IMS_RESULT eResult = IMS_SUCCESS;
+    SetUpForSetSdp(NegotiationState::STATE_IDLE, IMS_SUCCESS);
+    EXPECT_CALL(objPreconditionManager, OnSdpSent(&objSession, IMS_TRUE)).Times(1);
+    EXPECT_CALL(*pMessageSender, Start(CallType::VOIP)).WillOnce(Return(eResult));
+    CreateMtcSession();
+    EXPECT_EQ(pMtcSession->Start(), eResult);
+}
+
+TEST_F(MtcSessionTest, StartFailsIfSetSdpFails)
+{
+    SetUpForSetSdp(NegotiationState::STATE_IDLE, IMS_FAILURE);
+    EXPECT_CALL(objPreconditionManager, OnSdpSent(&objSession, IMS_TRUE)).Times(0);
+    EXPECT_CALL(*pMessageSender, Start(CallType::VOIP)).Times(0);
+    CreateMtcSession();
+    EXPECT_EQ(pMtcSession->Start(), IMS_FAILURE);
+}
+
+TEST_F(MtcSessionTest, SendProvisionalResponseSends183ReliablyWithoutSdpIfNoSdpIsNeeded)
+{
+    CreateMtcSession();
+
+    SetUpForSetSdp(NegotiationState::STATE_OFFER_SENT, IMS_SUCCESS);
+    ImsList<IMtcCall*> objCalls;
+    ON_CALL(objCallManager, GetCalls).WillByDefault(Return(objCalls));
+
+    EXPECT_CALL(*pMessageSender,
+            SendProvisionalResponse(SipStatusCode::SC_183, IMS_TRUE, IMS_FALSE, IMS_FALSE))
+            .Times(1);
+
+    pMtcSession->SendProvisionalResponse(IMS_FALSE, IMS_TRUE);
+}
+
+TEST_F(MtcSessionTest, SendProvisionalResponseSends183ReliablyWithSdp)
+{
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_IDLE, IMS_SUCCESS);
+    ImsList<IMtcCall*> objCalls;
+    ON_CALL(objCallManager, GetCalls).WillByDefault(Return(objCalls));
+
+    EXPECT_CALL(objPreconditionManager, OnSdpSent(&objSession, IMS_FALSE)).Times(1);
+    EXPECT_CALL(*pMessageSender,
+            SendProvisionalResponse(SipStatusCode::SC_183, IMS_TRUE, IMS_TRUE, IMS_FALSE))
+            .Times(1);
+
+    pMtcSession->SendProvisionalResponse(IMS_FALSE, IMS_TRUE);
+}
+
+TEST_F(MtcSessionTest, SendProvisionalResponseSends180WithAlertInfoIfUpdatingSessionExists)
+{
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_IDLE, IMS_SUCCESS);
+    ImsList<IMtcCall*> objCalls;
+    MockIMtcCall objOtherCall1;
+    ON_CALL(objOtherCall1, GetState).WillByDefault(Return(IMtcCall::State::INCOMING));
+    objCalls.Append(&objOtherCall1);
+    MockIMtcCall objOtherCall2;
+    ON_CALL(objOtherCall2, GetState).WillByDefault(Return(IMtcCall::State::UPDATING));
+    objCalls.Append(&objOtherCall2);
+    ON_CALL(objCallManager, GetCalls).WillByDefault(Return(objCalls));
+
+    EXPECT_CALL(*pMessageSender,
+            SendProvisionalResponse(SipStatusCode::SC_180, IMS_TRUE, IMS_TRUE, IMS_TRUE))
+            .Times(1);
+
+    pMtcSession->SendProvisionalResponse(IMS_TRUE, IMS_TRUE);
+}
+
+TEST_F(MtcSessionTest, SendProvisionalResponseSends183WithoutAlertInfoIfItIsConfirmedDialog)
+{
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_IDLE, IMS_SUCCESS);
+    ImsList<IMtcCall*> objCalls;
+    MockIMtcCall objOtherCall;
+    ON_CALL(objOtherCall, GetState).WillByDefault(Return(IMtcCall::State::UPDATING));
+    objCalls.Append(&objOtherCall);
+    ON_CALL(objCallManager, GetCalls).WillByDefault(Return(objCalls));
+
+    ON_CALL(objThisCall, GetState).WillByDefault(Return(IMtcCall::State::UPDATING));
+
+    EXPECT_CALL(objPreconditionManager, OnSdpSent(&objSession, IMS_FALSE)).Times(1);
+    EXPECT_CALL(*pMessageSender,
+            SendProvisionalResponse(SipStatusCode::SC_183, IMS_TRUE, IMS_TRUE, IMS_FALSE))
+            .Times(1);
+
+    pMtcSession->SendProvisionalResponse(IMS_FALSE, IMS_TRUE);
+}
+
+TEST_F(MtcSessionTest, SendProvisionalResponseFailsIfResultSetSdpIsFailure)
+{
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_IDLE, IMS_FAILURE);
+
+    EXPECT_CALL(*pMessageSender, SendProvisionalResponse(_, _, _, _)).Times(0);
+
+    pMtcSession->SendProvisionalResponse(IMS_FALSE, IMS_TRUE);
+}
+
+TEST_F(MtcSessionTest, SendProvisionalResponseSends180WithOutSdpIfUserAlertAndRprNotSupported)
+{
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_OFFER_SENT, IMS_SUCCESS);
+    ImsList<IMtcCall*> objCalls;
+    ON_CALL(objCallManager, GetCalls).WillByDefault(Return(objCalls));
+
+    EXPECT_CALL(objMediaManager, FormSdp(_, _, _)).Times(0);
+    EXPECT_CALL(*pMessageSender,
+            SendProvisionalResponse(SipStatusCode::SC_180, IMS_FALSE, IMS_FALSE, IMS_FALSE))
+            .Times(1);
+
+    pMtcSession->SendProvisionalResponse(IMS_TRUE, IMS_FALSE);
+}
+
+TEST_F(MtcSessionTest,
+        SendProvisionalResponseSends180WithOutSdpIfUserAlertAndRprSupportedAndNoSdpIsNeeded)
+{
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_OFFER_SENT, IMS_SUCCESS);
+    ImsList<IMtcCall*> objCalls;
+    ON_CALL(objCallManager, GetCalls).WillByDefault(Return(objCalls));
+
+    EXPECT_CALL(objMediaManager, FormSdp(_, _, _)).Times(0);
+    EXPECT_CALL(*pMessageSender,
+            SendProvisionalResponse(SipStatusCode::SC_180, IMS_TRUE, IMS_FALSE, IMS_FALSE))
+            .Times(1);
+
+    pMtcSession->SendProvisionalResponse(IMS_TRUE, IMS_TRUE);
+}
+
+TEST_F(MtcSessionTest, SendProvisionalResponseSends180WithSdpIfUserAlertAndRprSupported)
+{
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_IDLE, IMS_SUCCESS);
+    ImsList<IMtcCall*> objCalls;
+    ON_CALL(objCallManager, GetCalls).WillByDefault(Return(objCalls));
+
+    EXPECT_CALL(*pMessageSender,
+            SendProvisionalResponse(SipStatusCode::SC_180, IMS_TRUE, IMS_TRUE, IMS_FALSE))
+            .Times(1);
+
+    pMtcSession->SendProvisionalResponse(IMS_TRUE, IMS_TRUE);
+}
+
+TEST_F(MtcSessionTest, SendProvisionalResponseSends180RingingWhenUserAlerted)
+{
+    const IMS_BOOL bUserAlert = IMS_TRUE;
+    const IMS_BOOL bReliable = IMS_FALSE;
+    CreateMtcSession();
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVoice::KEY_FORCE_183_BEFORE_ALERTING_ON_NON_100REL_INVITE_BOOL))
+            .WillByDefault(Return(IMS_FALSE));
+
+    EXPECT_CALL(*pMessageSender, SendProvisionalResponse(SipStatusCode::SC_180, bReliable, _, _))
+            .WillOnce(Return(IMS_SUCCESS));
+
+    EXPECT_EQ(IMS_SUCCESS, pMtcSession->SendProvisionalResponse(bUserAlert, bReliable));
+}
+
+TEST_F(MtcSessionTest, SendProvisionalResponseSends183SessionProgressWhenNotUserAlerted)
+{
+    const IMS_BOOL bUserAlert = IMS_FALSE;
+    const IMS_BOOL bReliable = IMS_FALSE;
+    CreateMtcSession();
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVoice::KEY_FORCE_183_BEFORE_ALERTING_ON_NON_100REL_INVITE_BOOL))
+            .WillByDefault(Return(IMS_FALSE));
+
+    EXPECT_CALL(*pMessageSender, SendProvisionalResponse(SipStatusCode::SC_183, bReliable, _, _))
+            .WillOnce(Return(IMS_SUCCESS));
+
+    EXPECT_EQ(IMS_SUCCESS, pMtcSession->SendProvisionalResponse(bUserAlert, bReliable));
+}
+
+TEST_F(MtcSessionTest, SendProvisionalResponseSends183Before180IfConfiguredAndNon100rel)
+{
+    CreateMtcSession();
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVoice::KEY_FORCE_183_BEFORE_ALERTING_ON_NON_100REL_INVITE_BOOL))
+            .WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, IsResponseExist(&objSession, SipStatusCode::SC_183))
+            .WillByDefault(Return(IMS_FALSE));
+
+    EXPECT_CALL(*pMessageSender,
+            SendProvisionalResponse(SipStatusCode::SC_183, IMS_FALSE, IMS_FALSE, IMS_FALSE))
+            .Times(1)
+            .WillOnce(Return(IMS_SUCCESS));
+    EXPECT_CALL(*pMessageSender,
+            SendProvisionalResponse(SipStatusCode::SC_180, IMS_FALSE, IMS_FALSE, IMS_FALSE))
+            .Times(1)
+            .WillOnce(Return(IMS_SUCCESS));
+
+    pMtcSession->SendProvisionalResponse(IMS_TRUE, IMS_FALSE);
+}
+
+TEST_F(MtcSessionTest, SendProvisionalResponseDoesNotSend183Before180If183Exists)
+{
+    CreateMtcSession();
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVoice::KEY_FORCE_183_BEFORE_ALERTING_ON_NON_100REL_INVITE_BOOL))
+            .WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, IsResponseExist(&objSession, SipStatusCode::SC_183))
+            .WillByDefault(Return(IMS_TRUE));
+
+    EXPECT_CALL(*pMessageSender, SendProvisionalResponse(SipStatusCode::SC_183, _, _, _)).Times(0);
+    EXPECT_CALL(*pMessageSender,
+            SendProvisionalResponse(SipStatusCode::SC_180, IMS_FALSE, IMS_FALSE, IMS_FALSE))
+            .Times(1)
+            .WillOnce(Return(IMS_SUCCESS));
+
+    pMtcSession->SendProvisionalResponse(IMS_TRUE, IMS_FALSE);
+}
+
+TEST_F(MtcSessionTest, SendProvisionalResponseDoesNotSend183Before180IfConfigIsFalse)
+{
+    CreateMtcSession();
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVoice::KEY_FORCE_183_BEFORE_ALERTING_ON_NON_100REL_INVITE_BOOL))
+            .WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, IsResponseExist(&objSession, SipStatusCode::SC_183))
+            .WillByDefault(Return(IMS_FALSE));
+
+    EXPECT_CALL(*pMessageSender, SendProvisionalResponse(SipStatusCode::SC_183, _, _, _)).Times(0);
+    EXPECT_CALL(*pMessageSender,
+            SendProvisionalResponse(SipStatusCode::SC_180, IMS_FALSE, IMS_FALSE, IMS_FALSE))
+            .Times(1)
+            .WillOnce(Return(IMS_SUCCESS));
+
+    pMtcSession->SendProvisionalResponse(IMS_TRUE, IMS_FALSE);
+}
+
+TEST_F(MtcSessionTest, SendProvisionalResponseDoesNotSend183Before180If100relSupported)
+{
+    CreateMtcSession();
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVoice::KEY_FORCE_183_BEFORE_ALERTING_ON_NON_100REL_INVITE_BOOL))
+            .WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, IsResponseExist(&objSession, SipStatusCode::SC_183))
+            .WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils,
+            ContainsValueIgnoreCase(
+                    &objMessage, MtcExtensionSet::OPTION_TAG_RPR, ISipHeader::SUPPORTED, _))
+            .WillByDefault(Return(IMS_TRUE));
+    pMtcSession->HandleRequest(RequestType::START, objMessage);
+
+    EXPECT_CALL(*pMessageSender, SendProvisionalResponse(SipStatusCode::SC_183, _, _, _)).Times(0);
+    EXPECT_CALL(*pMessageSender,
+            SendProvisionalResponse(SipStatusCode::SC_180, IMS_FALSE, IMS_FALSE, IMS_FALSE))
+            .Times(1)
+            .WillOnce(Return(IMS_SUCCESS));
+
+    pMtcSession->SendProvisionalResponse(IMS_TRUE, IMS_FALSE);
+}
+
+TEST_F(MtcSessionTest, SendPrackSendsPrack)
+{
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_IDLE, IMS_SUCCESS);
+    EXPECT_CALL(*pMessageSender, SendPrack).Times(1);
+
+    pMtcSession->SendPrack(IMS_FALSE);
+}
+
+TEST_F(MtcSessionTest, SendPrackFailsIfSetSdpFails)
+{
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_IDLE, IMS_FAILURE);
+
+    EXPECT_CALL(*pMessageSender, SendPrack).Times(0);
+
+    pMtcSession->SendPrack(IMS_FALSE);
+}
+
+TEST_F(MtcSessionTest, SendPrackSendsPrackWithoutReOfferIfSdpOfferIsSent)
+{
+    CreateMtcSession();
+    ON_CALL(objMediaManager, GetNegotiationState(&objSession))
+            .WillByDefault(Return(NegotiationState::STATE_OFFER_SENT));
+    EXPECT_CALL(objMediaManager, FormSdp(_, _, _)).Times(0);
+    EXPECT_CALL(objPreconditionManager, FormPreconditionSdp(_, _)).Times(0);
+    EXPECT_CALL(*pMessageSender, SendPrack).Times(1);
+
+    pMtcSession->SendPrack(IMS_TRUE);
+}
+
+TEST_F(MtcSessionTest, SendPrackSendsPrackWithReOffer)
+{
+    CreateMtcSession();
+    ON_CALL(objMediaManager, GetNegotiationState(&objSession))
+            .WillByDefault(Return(NegotiationState::STATE_NEGOTIATED));
+
+    EXPECT_CALL(objMediaManager, FormSdp(&objSession, CallType::VOIP, IMS_FALSE))
+            .Times(1)
+            .WillOnce(Return(IMS_SUCCESS));
+    EXPECT_CALL(objPreconditionManager, FormPreconditionSdp(&objSession, IMS_FALSE)).Times(1);
+    EXPECT_CALL(*pMessageSender, SendPrack).Times(1);
+
+    pMtcSession->SendPrack(IMS_TRUE);
+}
+
+TEST_F(MtcSessionTest, SendPrackSendsPrackWithoutReOffer)
+{
+    CreateMtcSession();
+    ON_CALL(objMediaManager, GetNegotiationState(&objSession))
+            .WillByDefault(Return(NegotiationState::STATE_NEGOTIATED));
+
+    EXPECT_CALL(objMediaManager, FormSdp(&objSession, CallType::VOIP, IMS_FALSE)).Times(0);
+    EXPECT_CALL(objPreconditionManager, FormPreconditionSdp(&objSession, IMS_FALSE)).Times(0);
+    EXPECT_CALL(*pMessageSender, SendPrack).Times(1);
+
+    pMtcSession->SendPrack(IMS_FALSE);
+}
+
+TEST_F(MtcSessionTest, RespondToPrackRespondsToPrack)
+{
+    IMS_SINT32 eAnyStatusCode = 200;
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_IDLE, IMS_SUCCESS);
+
+    EXPECT_CALL(*pMessageSender, RespondToPrack(eAnyStatusCode)).Times(1);
+
+    pMtcSession->RespondToPrack(eAnyStatusCode);
+}
+
+TEST_F(MtcSessionTest, RespondToPrackFailsIfSetSdpFails)
+{
+    IMS_SINT32 eAnyStatusCode = 200;
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_IDLE, IMS_FAILURE);
+
+    EXPECT_CALL(*pMessageSender, RespondToPrack(eAnyStatusCode)).Times(0);
+
+    pMtcSession->RespondToPrack(eAnyStatusCode);
+}
+
+TEST_F(MtcSessionTest, SendEarlyUpdateSendsEarlyUpdate)
+{
+    UpdateType eAnyType = UpdateType::SESSION;
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_IDLE, IMS_SUCCESS);
+
+    EXPECT_CALL(*pMessageSender, SendEarlyUpdate(eAnyType)).Times(1);
+
+    pMtcSession->SendEarlyUpdate(eAnyType);
+}
+
+TEST_F(MtcSessionTest, SendEarlyUpdateFailsIfSetSdpFails)
+{
+    UpdateType eAnyType = UpdateType::SESSION;
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_IDLE, IMS_FAILURE);
+
+    EXPECT_CALL(*pMessageSender, SendEarlyUpdate(eAnyType)).Times(0);
+
+    pMtcSession->SendEarlyUpdate(eAnyType);
+}
+
+TEST_F(MtcSessionTest, GetOngoingUpdateTypeInitiallyReturnsNone)
+{
+    CreateMtcSession();
+    EXPECT_EQ(pMtcSession->GetOngoingUpdateType(), UpdateType::NONE);
+}
+
+TEST_F(MtcSessionTest, GetOngoingUpdateTypeReturnsTypeOfSendEarlyUpdate)
+{
+    UpdateType eSomeType = UpdateType::SESSION;
+    CreateMtcSession();
+
+    // If SetSdpToSend() is failed, UpdateType is not updated.
+    SetUpForSetSdp(NegotiationState::STATE_IDLE, IMS_SUCCESS);
+
+    pMtcSession->SendEarlyUpdate(eSomeType);
+
+    EXPECT_EQ(pMtcSession->GetOngoingUpdateType(), eSomeType);
+}
+
+TEST_F(MtcSessionTest, RespondToEarlyUpdateRespondsToEarlyUpdate)
+{
+    IMS_SINT32 eAnyStatusCode = 200;
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_IDLE, IMS_SUCCESS);
+
+    EXPECT_CALL(*pMessageSender, RespondToEarlyUpdate(eAnyStatusCode)).Times(1);
+
+    pMtcSession->RespondToEarlyUpdate(eAnyStatusCode);
+}
+
+TEST_F(MtcSessionTest, RespondToEarlyUpdateFailsIfSetSdpFails)
+{
+    IMS_SINT32 eAnyStatusCode = 200;
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_IDLE, IMS_FAILURE);
+
+    EXPECT_CALL(*pMessageSender, RespondToEarlyUpdate(eAnyStatusCode)).Times(0);
+
+    pMtcSession->RespondToEarlyUpdate(eAnyStatusCode);
+}
+
+TEST_F(MtcSessionTest, SendAckSendsAck)
+{
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_NEGOTIATED, IMS_SUCCESS);
+
+    EXPECT_CALL(*pMessageSender, SendAck).Times(1);
+
+    pMtcSession->SendAck();
+}
+
+TEST_F(MtcSessionTest, SendAckFailsIfSetSdpFails)
+{
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_OFFER_RECEIVED, IMS_FAILURE);
+
+    EXPECT_CALL(*pMessageSender, SendAck).Times(0);
+
+    pMtcSession->SendAck();
+}
+
+TEST_F(MtcSessionTest, AcceptAccepts)
+{
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_NEGOTIATED, IMS_SUCCESS);
+
+    EXPECT_CALL(*pMessageSender, Accept).Times(1);
+
+    pMtcSession->Accept();
+}
+
+TEST_F(MtcSessionTest, AcceptFailsIfSetSdpFails)
+{
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_OFFER_RECEIVED, IMS_FAILURE);
+
+    EXPECT_CALL(*pMessageSender, Accept).Times(0);
+
+    pMtcSession->Accept();
+}
+
+TEST_F(MtcSessionTest, RejectRejects)
+{
+    const CallReasonInfo objReason(CODE_LOCAL_CALL_BUSY);
+    CreateMtcSession();
+
+    EXPECT_CALL(*pMessageSender, Reject(objReason)).Times(1);
+
+    pMtcSession->Reject(objReason);
+}
+
+TEST_F(MtcSessionTest, UpdateUpdates)
+{
+    UpdateType eAnyType = UpdateType::SESSION;
+    IMS_BOOL bAlertInfo = IMS_TRUE;
+    IMS_SINT32 eMethod = SipMethod::INVITE;
+
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_NEGOTIATED, IMS_SUCCESS);
+
+    EXPECT_CALL(objMediaManager, FormSdp(_, _, _)).Times(1);
+    EXPECT_CALL(*pMessageSender, Update(eAnyType, bAlertInfo, eMethod, IMS_FALSE)).Times(1);
+
+    pMtcSession->Update(eAnyType, bAlertInfo, eMethod);
+}
+
+TEST_F(MtcSessionTest, UpdateUpdatesForRefresh)
+{
+    UpdateType eAnyType = UpdateType::REFRESH;
+    IMS_BOOL bAlertInfo = IMS_FALSE;
+    IMS_SINT32 eMethod = SipMethod::UPDATE;
+
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_NEGOTIATED, IMS_SUCCESS);
+
+    EXPECT_CALL(objMediaManager, FormSdp(_, _, _)).Times(1);
+    EXPECT_CALL(*pMessageSender, Update(eAnyType, bAlertInfo, eMethod, IMS_TRUE)).Times(1);
+
+    pMtcSession->Update(eAnyType, bAlertInfo, eMethod);
+}
+
+TEST_F(MtcSessionTest, UpdateFailsIfSetSdpFails)
+{
+    UpdateType eAnyType = UpdateType::REFRESH;
+    IMS_BOOL bAlertInfo = IMS_FALSE;
+    IMS_SINT32 eMethod = SipMethod::UPDATE;
+
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_OFFER_RECEIVED, IMS_FAILURE);
+
+    EXPECT_CALL(objMediaManager, FormSdp(_, _, _)).Times(1);
+    EXPECT_CALL(*pMessageSender, Update(_, _, _, _)).Times(0);
+
+    pMtcSession->Update(eAnyType, bAlertInfo, eMethod);
+}
+
+TEST_F(MtcSessionTest, UpdateUpdatesForLocation)
+{
+    UpdateType eAnyType = UpdateType::LOCATION;
+    IMS_BOOL bAlertInfo = IMS_FALSE;
+    IMS_SINT32 eMethod = SipMethod::UPDATE;
+
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_NEGOTIATED, IMS_SUCCESS);
+
+    EXPECT_CALL(objMediaManager, FormSdp(_, _, _)).Times(0);
+    EXPECT_CALL(*pMessageSender, Update(_, _, _, _)).Times(1);
+
+    pMtcSession->Update(eAnyType, bAlertInfo, eMethod);
+}
+
+TEST_F(MtcSessionTest, AcceptUpdateAcceptsUpdate)
+{
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_NEGOTIATED, IMS_SUCCESS);
+
+    SipMethod objSipMethod(SipMethod::INVITE);
+    ON_CALL(objMessage, GetMethod()).WillByDefault(ReturnRef(objSipMethod));
+    ON_CALL(objSession, GetPreviousRequest).WillByDefault(Return(&objMessage));
+
+    EXPECT_CALL(objMediaManager, FormSdp(_, _, _));
+    EXPECT_CALL(*pMessageSender, AcceptUpdate).Times(1);
+
+    pMtcSession->AcceptUpdate();
+}
+
+TEST_F(MtcSessionTest, AcceptUpdateDoesNotSetSdpIfMethodIsUpdate)
+{
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_NEGOTIATED, IMS_SUCCESS);
+
+    SipMethod objSipMethod(SipMethod::UPDATE);
+    ON_CALL(objMessage, GetMethod()).WillByDefault(ReturnRef(objSipMethod));
+    ON_CALL(objSession, GetPreviousRequest).WillByDefault(Return(&objMessage));
+
+    EXPECT_CALL(objMediaManager, FormSdp(_, _, _)).Times(0);
+    EXPECT_CALL(*pMessageSender, AcceptUpdate).Times(1);
+
+    pMtcSession->AcceptUpdate();
+}
+
+TEST_F(MtcSessionTest, AcceptUpdateReturnsFailureIfSetSdpFails)
+{
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_NEGOTIATED, IMS_FAILURE);
+
+    SipMethod objSipMethod(SipMethod::INVITE);
+    ON_CALL(objMessage, GetMethod()).WillByDefault(ReturnRef(objSipMethod));
+    ON_CALL(objSession, GetPreviousRequest).WillByDefault(Return(&objMessage));
+
+    EXPECT_CALL(*pMessageSender, AcceptUpdate).Times(0);
+
+    EXPECT_EQ(pMtcSession->AcceptUpdate(), IMS_FAILURE);
+}
+
+TEST_F(MtcSessionTest, CancelUpdateCancelsUpdate)
+{
+    const CallReasonInfo objReason(CODE_TIMEOUT_NO_ANSWER_CALL_UPDATE);
+    CreateMtcSession();
+
+    EXPECT_CALL(*pMessageSender, CancelUpdate(objReason)).Times(1);
+
+    pMtcSession->CancelUpdate(objReason);
+}
+
+TEST_F(MtcSessionTest, TerminateWithReasonVccDoesNotInvokeTerminate)
+{
+    CreateMtcSession();
+    const CallReasonInfo objReason(CODE_LOCAL_CALL_VCC_ON_PROGRESSING);
+    EXPECT_CALL(*pMessageSender, Terminate(_, _)).Times(0);
+    EXPECT_CALL(*pSessionInterfaceHolder, ReleaseISession(&objSession, IMS_FALSE, IMS_TRUE));
+
+    pMtcSession->Terminate(IMS_TRUE, objReason);
+    // Trigger MtcSession's destructor
+    delete pMtcSession;
+    pMtcSession = IMS_NULL;
+}
+
+TEST_F(MtcSessionTest, TerminateWithReasonNotRegisteredSetsStartFailedFlag)
+{
+    CreateMtcSession();
+    const CallReasonInfo objReason(CODE_LOCAL_NOT_REGISTERED);
+
+    EXPECT_CALL(*pMessageSender, Terminate(_, _)).Times(0);
+    EXPECT_CALL(*pSessionInterfaceHolder, ReleaseISession(&objSession, IMS_FALSE, IMS_TRUE));
+
+    pMtcSession->Terminate(IMS_TRUE, objReason);
+    // Trigger MtcSession's destructor
+    delete pMtcSession;
+    pMtcSession = IMS_NULL;
+}
+
+TEST_F(MtcSessionTest, TerminateWithReasonNoServiceSetsStartFailedFlag)
+{
+    CreateMtcSession();
+    const CallReasonInfo objReason(CODE_LOCAL_NETWORK_NO_SERVICE);
+
+    EXPECT_CALL(*pMessageSender, Terminate(_, _)).Times(0);
+    EXPECT_CALL(*pSessionInterfaceHolder, ReleaseISession(&objSession, IMS_FALSE, IMS_TRUE));
+
+    pMtcSession->Terminate(IMS_TRUE, objReason);
+    // Trigger MtcSession's destructor
+    delete pMtcSession;
+    pMtcSession = IMS_NULL;
+}
+
+TEST_F(MtcSessionTest, TerminateWithReasonNoLteCoverageSetsStartFailedFlag)
+{
+    CreateMtcSession();
+    const CallReasonInfo objReason(CODE_LOCAL_NETWORK_NO_LTE_COVERAGE);
+
+    EXPECT_CALL(*pMessageSender, Terminate(_, _)).Times(0);
+    EXPECT_CALL(*pSessionInterfaceHolder, ReleaseISession(&objSession, IMS_FALSE, IMS_TRUE));
+
+    pMtcSession->Terminate(IMS_TRUE, objReason);
+    // Trigger MtcSession's destructor
+    delete pMtcSession;
+    pMtcSession = IMS_NULL;
+}
+
+TEST_F(MtcSessionTest, TerminateWithReasonLocalServiceUnavailableInvokesTerminate)
+{
+    CreateMtcSession();
+    const CallReasonInfo objReason(CODE_LOCAL_SERVICE_UNAVAILABLE);
+
+    EXPECT_CALL(*pMessageSender, Terminate(IMS_TRUE, objReason)).Times(1);
+    pMtcSession->Terminate(IMS_TRUE, objReason);
+}
+
+TEST_F(MtcSessionTest, TerminateWithReasonUserTerminatedInvokesTerminate)
+{
+    CreateMtcSession();
+    const CallReasonInfo objReason(CODE_USER_TERMINATED);
+    EXPECT_CALL(*pMessageSender, Terminate(IMS_TRUE, objReason)).Times(1);
+
+    pMtcSession->Terminate(IMS_TRUE, objReason);
+}
+
+TEST_F(MtcSessionTest, TerminateDoesNotInvokeHandleByTransactionIfNotUsingBye)
+{
+    CreateMtcSession();
+
+    EXPECT_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVoice::
+                            KEY_ENABLE_REGISTRATION_RECOVERY_WHEN_BYE_TRANSACTION_TIMEOUT_BOOL))
+            .Times(0);
+
+    EXPECT_CALL(objContext, GetSessions()).Times(0);
+    EXPECT_CALL(objMtcService, GetAosConnector).Times(0);
+    EXPECT_CALL(objCallController, HandleByeTransaction(_, _)).Times(0);
+
+    pMtcSession->Terminate(IMS_FALSE, CallReasonInfo(CODE_USER_TERMINATED));
+}
+
+TEST_F(MtcSessionTest, TerminateDoesNotInvokeHandleByTransactionIfNotConfigured)
+{
+    CreateMtcSession();
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVoice::
+                            KEY_ENABLE_REGISTRATION_RECOVERY_WHEN_BYE_TRANSACTION_TIMEOUT_BOOL))
+            .WillByDefault(Return(IMS_FALSE));
+
+    EXPECT_CALL(objContext, GetSessions()).Times(0);
+    EXPECT_CALL(objMtcService, GetAosConnector).Times(0);
+    EXPECT_CALL(objCallController, HandleByeTransaction(_, _)).Times(0);
+
+    pMtcSession->Terminate(IMS_TRUE, CallReasonInfo(CODE_USER_TERMINATED));
+}
+
+TEST_F(MtcSessionTest, TerminateDoesNotInvokeHandleByTransactionIfNotLastSession)
+{
+    CreateMtcSession();
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVoice::
+                            KEY_ENABLE_REGISTRATION_RECOVERY_WHEN_BYE_TRANSACTION_TIMEOUT_BOOL))
+            .WillByDefault(Return(IMS_TRUE));
+
+    ImsList<IMtcSession*> objSessions;
+    objSessions.Append(pMtcSession);
+    objSessions.Append(pMtcSession);
+    EXPECT_CALL(objContext, GetSessions()).WillOnce(ReturnRef(objSessions));
+    objCallInfo.eEmergencyType = EmergencyType::NONE;
+
+    EXPECT_CALL(objMtcService, GetAosConnector).Times(0);
+    EXPECT_CALL(objCallController, HandleByeTransaction(_, _)).Times(0);
+
+    pMtcSession->Terminate(IMS_TRUE, CallReasonInfo(CODE_USER_TERMINATED));
+}
+
+TEST_F(MtcSessionTest, TerminateDoesNotInvokeHandleByTransactionIfEmergencyCall)
+{
+    CreateMtcSession();
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVoice::
+                            KEY_ENABLE_REGISTRATION_RECOVERY_WHEN_BYE_TRANSACTION_TIMEOUT_BOOL))
+            .WillByDefault(Return(IMS_TRUE));
+
+    ImsList<IMtcSession*> objSessions;
+    objSessions.Append(pMtcSession);
+    EXPECT_CALL(objContext, GetSessions()).WillOnce(ReturnRef(objSessions));
+    objCallInfo.eEmergencyType = EmergencyType::EMERGENCY_ROUTING;
+
+    EXPECT_CALL(objMtcService, GetAosConnector).Times(0);
+    EXPECT_CALL(objCallController, HandleByeTransaction(_, _)).Times(0);
+
+    pMtcSession->Terminate(IMS_TRUE, CallReasonInfo(CODE_USER_TERMINATED));
+}
+
+TEST_F(MtcSessionTest, TerminateDoesNotInvokeHandleByTransactionIfNoAosConnector)
+{
+    CreateMtcSession();
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVoice::
+                            KEY_ENABLE_REGISTRATION_RECOVERY_WHEN_BYE_TRANSACTION_TIMEOUT_BOOL))
+            .WillByDefault(Return(IMS_TRUE));
+
+    ImsList<IMtcSession*> objSessions;
+    objSessions.Append(pMtcSession);
+    EXPECT_CALL(objContext, GetSessions()).WillOnce(ReturnRef(objSessions));
+    objCallInfo.eEmergencyType = EmergencyType::NONE;
+
+    EXPECT_CALL(objMtcService, GetAosConnector).WillOnce(Return(nullptr));
+    EXPECT_CALL(objCallController, HandleByeTransaction(_, _)).Times(0);
+
+    pMtcSession->Terminate(IMS_TRUE, CallReasonInfo(CODE_USER_TERMINATED));
+}
+
+TEST_F(MtcSessionTest, TerminateInvokesHandleByeTransaction)
+{
+    CreateMtcSession();
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVoice::
+                            KEY_ENABLE_REGISTRATION_RECOVERY_WHEN_BYE_TRANSACTION_TIMEOUT_BOOL))
+            .WillByDefault(Return(IMS_TRUE));
+
+    ImsList<IMtcSession*> objSessions;
+    objSessions.Append(pMtcSession);
+    EXPECT_CALL(objContext, GetSessions()).WillOnce(ReturnRef(objSessions));
+    objCallInfo.eEmergencyType = EmergencyType::NONE;
+
+    EXPECT_CALL(objMtcService, GetAosConnector).WillOnce(Return(&objAosConnector));
+
+    EXPECT_CALL(objCallController, HandleByeTransaction(_, _))
+            .WillOnce(Invoke(
+                    [this]([[maybe_unused]] CallKey key,
+                            std::function<void(ISession&)> objOperation)
+                    {
+                        objOperation(objSession);
+                    }));
+
+    MockIMessage objByeRequest;
+    ON_CALL(objSession, GetPreviousRequest(IMessage::SESSION_TERMINATE))
+            .WillByDefault(Return(&objByeRequest));
+    ON_CALL(objByeRequest, GetState()).WillByDefault(Return(IMessage::STATE_SENT));
+    ON_CALL(objSession, GetPreviousResponse(IMessage::SESSION_TERMINATE))
+            .WillByDefault(Return(IMS_NULL));
+    EXPECT_CALL(objAosConnector, Control(ImsAosControl::PCSCF_NEXT_WITH_DISCOVERY));
+
+    pMtcSession->Terminate(IMS_TRUE, CallReasonInfo(CODE_USER_TERMINATED));
+}
+
+TEST_F(MtcSessionTest, TerminateInvokesHandleByeTransactionButNoAosControlIfNotTimeout)
+{
+    CreateMtcSession();
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVoice::
+                            KEY_ENABLE_REGISTRATION_RECOVERY_WHEN_BYE_TRANSACTION_TIMEOUT_BOOL))
+            .WillByDefault(Return(IMS_TRUE));
+
+    ImsList<IMtcSession*> objSessions;
+    objSessions.Append(pMtcSession);
+    EXPECT_CALL(objContext, GetSessions()).WillOnce(ReturnRef(objSessions));
+    objCallInfo.eEmergencyType = EmergencyType::NONE;
+
+    EXPECT_CALL(objMtcService, GetAosConnector).WillOnce(Return(&objAosConnector));
+
+    EXPECT_CALL(objCallController, HandleByeTransaction(_, _))
+            .WillOnce(Invoke(
+                    [this]([[maybe_unused]] CallKey key,
+                            std::function<void(ISession&)> objOperation)
+                    {
+                        objOperation(objSession);
+                    }));
+
+    MockIMessage objByeRequest;
+    ON_CALL(objSession, GetPreviousRequest(IMessage::SESSION_TERMINATE))
+            .WillByDefault(Return(&objByeRequest));
+    ON_CALL(objByeRequest, GetState()).WillByDefault(Return(IMessage::STATE_SENT));
+    MockIMessage objByeResponse;
+    ON_CALL(objSession, GetPreviousResponse(IMessage::SESSION_TERMINATE))
+            .WillByDefault(Return(&objByeResponse));
+    EXPECT_CALL(objAosConnector, Control(ImsAosControl::PCSCF_NEXT_WITH_DISCOVERY)).Times(0);
+
+    pMtcSession->Terminate(IMS_TRUE, CallReasonInfo(CODE_USER_TERMINATED));
+}
+
+TEST_F(MtcSessionTest, TerminateInvokesHandleByeTransactionButNoAosControlIfByeIsNull)
+{
+    CreateMtcSession();
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVoice::
+                            KEY_ENABLE_REGISTRATION_RECOVERY_WHEN_BYE_TRANSACTION_TIMEOUT_BOOL))
+            .WillByDefault(Return(IMS_TRUE));
+
+    ImsList<IMtcSession*> objSessions;
+    objSessions.Append(pMtcSession);
+    EXPECT_CALL(objContext, GetSessions()).WillOnce(ReturnRef(objSessions));
+    objCallInfo.eEmergencyType = EmergencyType::NONE;
+
+    EXPECT_CALL(objMtcService, GetAosConnector).WillOnce(Return(&objAosConnector));
+
+    EXPECT_CALL(objCallController, HandleByeTransaction(_, _))
+            .WillOnce(Invoke(
+                    [this]([[maybe_unused]] CallKey key,
+                            std::function<void(ISession&)> objOperation)
+                    {
+                        objOperation(objSession);
+                    }));
+
+    ON_CALL(objSession, GetPreviousRequest(IMessage::SESSION_TERMINATE))
+            .WillByDefault(Return(IMS_NULL));
+    EXPECT_CALL(objSession, GetPreviousResponse(IMessage::SESSION_TERMINATE)).Times(0);
+    EXPECT_CALL(objAosConnector, Control(ImsAosControl::PCSCF_NEXT_WITH_DISCOVERY)).Times(0);
+
+    pMtcSession->Terminate(IMS_TRUE, CallReasonInfo(CODE_USER_TERMINATED));
+}
+
+TEST_F(MtcSessionTest, TerminateInvokesHandleByeTransactionButNoAosControlIfByeIsReceived)
+{
+    CreateMtcSession();
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVoice::
+                            KEY_ENABLE_REGISTRATION_RECOVERY_WHEN_BYE_TRANSACTION_TIMEOUT_BOOL))
+            .WillByDefault(Return(IMS_TRUE));
+
+    ImsList<IMtcSession*> objSessions;
+    objSessions.Append(pMtcSession);
+    EXPECT_CALL(objContext, GetSessions()).WillOnce(ReturnRef(objSessions));
+    objCallInfo.eEmergencyType = EmergencyType::NONE;
+
+    EXPECT_CALL(objMtcService, GetAosConnector).WillOnce(Return(&objAosConnector));
+
+    EXPECT_CALL(objCallController, HandleByeTransaction(_, _))
+            .WillOnce(Invoke(
+                    [this]([[maybe_unused]] CallKey key,
+                            std::function<void(ISession&)> objOperation)
+                    {
+                        objOperation(objSession);
+                    }));
+
+    MockIMessage objByeRequest;
+    ON_CALL(objSession, GetPreviousRequest(IMessage::SESSION_TERMINATE))
+            .WillByDefault(Return(&objByeRequest));
+    ON_CALL(objByeRequest, GetState()).WillByDefault(Return(IMessage::STATE_RECEIVED));
+    EXPECT_CALL(objSession, GetPreviousResponse(IMessage::SESSION_TERMINATE)).Times(0);
+    EXPECT_CALL(objAosConnector, Control(ImsAosControl::PCSCF_NEXT_WITH_DISCOVERY)).Times(0);
+
+    pMtcSession->Terminate(IMS_TRUE, CallReasonInfo(CODE_USER_TERMINATED));
+}
+
+TEST_F(MtcSessionTest, SecondTerminateReturnsFailure)
+{
+    CreateMtcSession();
+    const CallReasonInfo objReason(CODE_USER_TERMINATED);
+    EXPECT_CALL(*pMessageSender, Terminate(_, _)).Times(1);
+
+    EXPECT_EQ(IMS_SUCCESS, pMtcSession->Terminate(IMS_TRUE, objReason));
+    EXPECT_EQ(IMS_FAILURE, pMtcSession->Terminate(IMS_TRUE, objReason));
+}
+
+TEST_F(MtcSessionTest, GetExtensionSetReturnsMember)
+{
+    CreateMtcSession();
+    const MtcExtensionSet& objExtensionSet = pMtcSession->GetExtensionSet();
+    EXPECT_TRUE(objExtensionSet.IsAvailableOnLocal(
+            MtcExtensionSet::OPTION_TAG_EARLY_DIALOG_TERMINATED));
+    EXPECT_TRUE(objExtensionSet.IsAvailableOnLocal(MtcExtensionSet::OPTION_TAG_FROM_CHANGE));
+    EXPECT_TRUE(objExtensionSet.IsAvailableOnLocal(MtcExtensionSet::OPTION_TAG_HISTORY_INFO));
+    EXPECT_TRUE(objExtensionSet.IsAvailableOnLocal(MtcExtensionSet::OPTION_TAG_REPLACES));
+    EXPECT_TRUE(objExtensionSet.IsAvailableOnLocal(MtcExtensionSet::OPTION_TAG_RPR));
+    EXPECT_TRUE(objExtensionSet.IsAvailableOnLocal(MtcExtensionSet::OPTION_TAG_SESSION_TIMER));
+    EXPECT_TRUE(objExtensionSet.IsAvailableOnLocal(MtcExtensionSet::OPTION_TAG_TARGET_DIALOG));
+    EXPECT_TRUE(objExtensionSet.IsAvailableOnLocal(MtcExtensionSet::OPTION_TAG_PRECONDITION));
+}
+
+TEST_F(MtcSessionTest, PreconditionExtensionIsNotAvailableByConfig)
+{
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVoice::KEY_VOICE_QOS_PRECONDITION_SUPPORTED_BOOL))
+            .WillByDefault(Return(IMS_FALSE));
+    CreateMtcSession();
+    const MtcExtensionSet& objExtensionSet = pMtcSession->GetExtensionSet();
+    EXPECT_FALSE(objExtensionSet.IsAvailableOnLocal(MtcExtensionSet::OPTION_TAG_PRECONDITION));
+}
+
+TEST_F(MtcSessionTest, PreconditionExtensionIsAvailableForUssi)
+{
+    CreateMtcSession();
+    objCallInfo.bUssi = IMS_TRUE;
+    const MtcExtensionSet& objExtensionSet = pMtcSession->GetExtensionSet();
+    EXPECT_TRUE(objExtensionSet.IsAvailableOnLocal(MtcExtensionSet::OPTION_TAG_PRECONDITION));
+}
+
+TEST_F(MtcSessionTest, HandleStartRequestUpdatesCallTypeIfVideoTextInRegAndVideoTextInMessage)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    RequestType eType = RequestType::START;
+
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, GetCallType(&objMessage, &objSession, IMS_TRUE))
+            .WillByDefault(Return(CallType::VIDEO_RTT));
+
+    pMtcSession->HandleRequest(eType, objMessage);
+
+    EXPECT_EQ(CallType::UNKNOWN, pMtcSession->GetPreviousCallType());
+    EXPECT_EQ(CallType::VIDEO_RTT, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleStartRequestUpdatesCallTypeIfVideoTextInRegAndVideoTextNotInMessage)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    RequestType eType = RequestType::START;
+
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, GetCallType(&objMessage, &objSession, IMS_TRUE))
+            .WillByDefault(Return(CallType::VOIP));
+
+    pMtcSession->HandleRequest(eType, objMessage);
+
+    EXPECT_EQ(CallType::UNKNOWN, pMtcSession->GetPreviousCallType());
+    EXPECT_EQ(CallType::VOIP, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleStartRequestUpdatesCallTypeIfNoVideoTextInRegAndVideoTextInMessage)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_FALSE, IMS_FALSE);
+    RequestType eType = RequestType::START;
+
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, GetCallType(&objMessage, &objSession, IMS_TRUE))
+            .WillByDefault(Return(CallType::VIDEO_RTT));
+    ON_CALL(objMessageUtils, IsFocusConf(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    pMtcSession->HandleRequest(eType, objMessage);
+
+    EXPECT_EQ(CallType::UNKNOWN, pMtcSession->GetPreviousCallType());
+    EXPECT_EQ(CallType::VOIP, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleStartRequestUpdatesCallTypeIfOnlyVideoInRegAndOnlyTextInMessage)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_FALSE, IMS_TRUE, IMS_FALSE);
+    RequestType eType = RequestType::START;
+
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, GetCallType(&objMessage, &objSession, IMS_TRUE))
+            .WillByDefault(Return(CallType::RTT));
+    ON_CALL(objMessageUtils, IsFocusConf(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    pMtcSession->HandleRequest(eType, objMessage);
+
+    EXPECT_EQ(CallType::UNKNOWN, pMtcSession->GetPreviousCallType());
+    EXPECT_EQ(CallType::VOIP, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleStartRequestWithoutSdpSetsCallTypeVoipIfConfigSet)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    RequestType eType = RequestType::START;
+
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_MEDIA_TYPE_FOR_OFFERLESS_INVITE_INT))
+            .WillByDefault(Return(ConfigVoice::OFFERLESS_INVITE_MEDIA_TYPE_AUDIO));
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVt::KEY_POLICY_FOR_TEXT_WITH_VIDEO_INT))
+            .WillByDefault(Return(ConfigVt::TEXT_VIDEO_NOT_ALLOWED));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    pMtcSession->HandleRequest(eType, objMessage);
+
+    EXPECT_EQ(CallType::VOIP, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleStartRequestWithoutSdpSetsCallTypeVoipIfVoiceOnlyRegistered)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_FALSE, IMS_FALSE);
+    RequestType eType = RequestType::START;
+
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_MEDIA_TYPE_FOR_OFFERLESS_INVITE_INT))
+            .WillByDefault(Return(ConfigVoice::OFFERLESS_INVITE_MEDIA_TYPE_FULL_CAPABILITY));
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVt::KEY_POLICY_FOR_TEXT_WITH_VIDEO_INT))
+            .WillByDefault(Return(ConfigVt::TEXT_VIDEO_NOT_ALLOWED));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    pMtcSession->HandleRequest(eType, objMessage);
+
+    EXPECT_EQ(CallType::VOIP, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleStartRequestWithoutSdpSetsCallTypeVtIfVideoRegistered)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_FALSE);
+    RequestType eType = RequestType::START;
+
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_MEDIA_TYPE_FOR_OFFERLESS_INVITE_INT))
+            .WillByDefault(Return(ConfigVoice::OFFERLESS_INVITE_MEDIA_TYPE_FULL_CAPABILITY));
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVt::KEY_POLICY_FOR_TEXT_WITH_VIDEO_INT))
+            .WillByDefault(Return(ConfigVt::TEXT_VIDEO_NOT_ALLOWED));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    pMtcSession->HandleRequest(eType, objMessage);
+
+    EXPECT_EQ(CallType::VT, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleStartRequestWithoutSdpSetsCallTypeRttIfTextRegistered)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_FALSE, IMS_TRUE);
+    RequestType eType = RequestType::START;
+
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_MEDIA_TYPE_FOR_OFFERLESS_INVITE_INT))
+            .WillByDefault(Return(ConfigVoice::OFFERLESS_INVITE_MEDIA_TYPE_FULL_CAPABILITY));
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVt::KEY_POLICY_FOR_TEXT_WITH_VIDEO_INT))
+            .WillByDefault(Return(ConfigVt::TEXT_VIDEO_NOT_ALLOWED));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    pMtcSession->HandleRequest(eType, objMessage);
+
+    EXPECT_EQ(CallType::RTT, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleStartRequestWithoutSdpSetsCallTypeRttVideoIfSupported)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    RequestType eType = RequestType::START;
+
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_MEDIA_TYPE_FOR_OFFERLESS_INVITE_INT))
+            .WillByDefault(Return(ConfigVoice::OFFERLESS_INVITE_MEDIA_TYPE_FULL_CAPABILITY));
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVt::KEY_POLICY_FOR_TEXT_WITH_VIDEO_INT))
+            .WillByDefault(Return(ConfigVt::TEXT_VIDEO_ALLOWED));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    pMtcSession->HandleRequest(eType, objMessage);
+
+    EXPECT_EQ(CallType::VIDEO_RTT, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleRequestWithPrackUpdatesCallType)
+{
+    CreateMtcSession(CallType::VT, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    RequestType eType = RequestType::PRACK;
+
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_TRUE));
+
+    ON_CALL(objMessageUtils, GetCallType(&objMessage, &objSession, IMS_TRUE))
+            .WillByDefault(Return(CallType::VOIP));
+    ON_CALL(objMessageUtils, IsFocusConf(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    pMtcSession->HandleRequest(eType, objMessage);
+
+    EXPECT_EQ(CallType::VT, pMtcSession->GetPreviousCallType());
+    EXPECT_EQ(CallType::VOIP, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleRequestWithAckUpdatesCallType)
+{
+    CreateMtcSession(CallType::VT, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    RequestType eType = RequestType::ACK;
+
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_TRUE));
+
+    ON_CALL(objMessageUtils, GetCallType(&objMessage, &objSession, IMS_TRUE))
+            .WillByDefault(Return(CallType::VOIP));
+    ON_CALL(objMessageUtils, IsFocusConf(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    pMtcSession->HandleRequest(eType, objMessage);
+
+    EXPECT_EQ(CallType::VT, pMtcSession->GetPreviousCallType());
+    EXPECT_EQ(CallType::VOIP, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleRequestUpdatesVideoCapabilityByAvchange)
+{
+    CreateMtcSession(CallType::VT, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    RequestType eType = RequestType::EARLY_UPDATE;
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVt::KEY_SUPPORT_VIDEO_CALL_UPGRADE_REGARDLESS_OF_FEATURE_TAGS_BOOL))
+            .WillByDefault(Return(IMS_FALSE));
+    AString strHeader(MessageUtil::STR_P_TTA_VOLTE_INFO);
+    ON_CALL(*pConfigurationProxy,
+            Contains(ConfigVoice::KEY_CARRIER_SPECIFIC_SIP_HEADERS_STRING_ARRAY,
+                    MessageUtil::STR_P_TTA_VOLTE_INFO))
+            .WillByDefault(Return(IMS_TRUE));
+
+    // avchange case
+    ON_CALL(objMessageUtils, GetHeader(&objMessage, ISipHeader::UNKNOWN, strHeader))
+            .WillByDefault(Return(MessageUtil::STR_AVCHANGE));
+    pMtcSession->HandleRequest(eType, objMessage);
+    EXPECT_TRUE(pMtcSession->IsVideoCapable());
+
+    // no avchange case
+    ON_CALL(objMessageUtils, GetHeader(&objMessage, ISipHeader::UNKNOWN, strHeader))
+            .WillByDefault(Return(""));
+    pMtcSession->HandleRequest(eType, objMessage);
+    EXPECT_FALSE(pMtcSession->IsVideoCapable());
+}
+
+TEST_F(MtcSessionTest, HandleEarlyUpdateRequestDoesNotInvokeSetCallTypeIfSameCallType)
+{
+    CreateMtcSession(CallType::VT, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    RequestType eType = RequestType::EARLY_UPDATE;
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVt::KEY_SUPPORT_VIDEO_CALL_UPGRADE_REGARDLESS_OF_FEATURE_TAGS_BOOL))
+            .WillByDefault(Return(IMS_FALSE));
+    ON_CALL(*pConfigurationProxy,
+            Contains(ConfigVoice::KEY_CARRIER_SPECIFIC_SIP_HEADERS_STRING_ARRAY,
+                    MessageUtil::STR_P_TTA_VOLTE_INFO))
+            .WillByDefault(Return(IMS_FALSE));
+
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, GetCallType(&objMessage, &objSession, IMS_TRUE))
+            .WillByDefault(Return(CallType::VT));
+    ON_CALL(objMessageUtils, IsFocusConf(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    EXPECT_EQ(CallType::UNKNOWN, pMtcSession->GetPreviousCallType());
+    EXPECT_EQ(CallType::VT, pMtcSession->GetCallType());
+
+    pMtcSession->HandleRequest(eType, objMessage);
+
+    // previous call type is not changed.
+    EXPECT_EQ(CallType::UNKNOWN, pMtcSession->GetPreviousCallType());
+    EXPECT_EQ(CallType::VT, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleUpdateRequestWithSdpInvokesSetCallTypeIfSameCallType)
+{
+    CreateMtcSession(CallType::VT, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    RequestType eType = RequestType::UPDATE;
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVt::KEY_SUPPORT_VIDEO_CALL_UPGRADE_REGARDLESS_OF_FEATURE_TAGS_BOOL))
+            .WillByDefault(Return(IMS_FALSE));
+    ON_CALL(*pConfigurationProxy,
+            Contains(ConfigVoice::KEY_CARRIER_SPECIFIC_SIP_HEADERS_STRING_ARRAY,
+                    MessageUtil::STR_P_TTA_VOLTE_INFO))
+            .WillByDefault(Return(IMS_FALSE));
+
+    SipMethod objSipMethod(SipMethod::INVITE);
+    ON_CALL(objMessage, GetMethod()).WillByDefault(ReturnRef(objSipMethod));
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, GetCallType(&objMessage, &objSession, IMS_TRUE))
+            .WillByDefault(Return(CallType::VT));
+    ON_CALL(objMessageUtils, IsFocusConf(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    EXPECT_EQ(CallType::UNKNOWN, pMtcSession->GetPreviousCallType());
+    EXPECT_EQ(CallType::VT, pMtcSession->GetCallType());
+
+    pMtcSession->HandleRequest(eType, objMessage);
+
+    // previous call type is changed.
+    EXPECT_EQ(CallType::VT, pMtcSession->GetPreviousCallType());
+    EXPECT_EQ(CallType::VT, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleUpdateRequestWithoutSdpInvokesSetCallTypeByRegisteredFeature)
+{
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_MEDIA_TYPE_FOR_OFFERLESS_REINVITE_INT))
+            .WillByDefault(Return(ConfigVoice::OFFERLESS_REINVITE_MEDIA_TYPE_FULL));
+
+    SipMethod objSipMethod(SipMethod::INVITE);
+    ON_CALL(objMessage, GetMethod()).WillByDefault(ReturnRef(objSipMethod));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    CreateMtcSession(CallType::VT, PeerType::MO, IMS_TRUE, IMS_FALSE, IMS_TRUE);
+    pMtcSession->SetCallType(CallType::VIDEO_RTT);
+    RequestType eType = RequestType::UPDATE;
+
+    pMtcSession->HandleRequest(eType, objMessage);
+
+    EXPECT_EQ(CallType::RTT, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleUpdateRequestWithoutSdpDoesNotInvokeSetCallTypeIfUpdateMethod)
+{
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_MEDIA_TYPE_FOR_OFFERLESS_REINVITE_INT))
+            .WillByDefault(Return(ConfigVoice::OFFERLESS_REINVITE_MEDIA_TYPE_AUDIO));
+
+    SipMethod objSipMethod(SipMethod::UPDATE);
+    ON_CALL(objMessage, GetMethod()).WillByDefault(ReturnRef(objSipMethod));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    CreateMtcSession(CallType::VT, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    pMtcSession->SetCallType(CallType::VIDEO_RTT);
+    RequestType eType = RequestType::UPDATE;
+
+    pMtcSession->HandleRequest(eType, objMessage);
+
+    EXPECT_EQ(CallType::VIDEO_RTT, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleUpdateRequestWithoutSdpInvokesSetCallTypeWithVoip)
+{
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_MEDIA_TYPE_FOR_OFFERLESS_REINVITE_INT))
+            .WillByDefault(Return(ConfigVoice::OFFERLESS_REINVITE_MEDIA_TYPE_AUDIO));
+
+    SipMethod objSipMethod(SipMethod::INVITE);
+    ON_CALL(objMessage, GetMethod()).WillByDefault(ReturnRef(objSipMethod));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    CreateMtcSession(CallType::VT, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    pMtcSession->SetCallType(CallType::VIDEO_RTT);
+    RequestType eType = RequestType::UPDATE;
+
+    pMtcSession->HandleRequest(eType, objMessage);
+
+    EXPECT_EQ(CallType::VOIP, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleUpdateRequestWithoutSdpInvokesSetCallTypeWithCurrentType)
+{
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_MEDIA_TYPE_FOR_OFFERLESS_REINVITE_INT))
+            .WillByDefault(Return(ConfigVoice::OFFERLESS_REINVITE_MEDIA_TYPE_CURRENT));
+
+    SipMethod objSipMethod(SipMethod::INVITE);
+    ON_CALL(objMessage, GetMethod()).WillByDefault(ReturnRef(objSipMethod));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    CreateMtcSession(CallType::VT, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    pMtcSession->SetCallType(CallType::RTT);
+    pMtcSession->SetCallType(CallType::VIDEO_RTT);
+    RequestType eType = RequestType::UPDATE;
+
+    pMtcSession->HandleRequest(eType, objMessage);
+
+    EXPECT_EQ(CallType::VIDEO_RTT, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleUpdateRequestWithoutSdpInvokesSetCallTypeByHistory)
+{
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_MEDIA_TYPE_FOR_OFFERLESS_REINVITE_INT))
+            .WillByDefault(Return(ConfigVoice::OFFERLESS_REINVITE_MEDIA_TYPE_BY_HISTORY));
+
+    SipMethod objSipMethod(SipMethod::INVITE);
+    ON_CALL(objMessage, GetMethod()).WillByDefault(ReturnRef(objSipMethod));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    CreateMtcSession(CallType::VT, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    pMtcSession->SetCallType(CallType::VIDEO_RTT);
+    pMtcSession->SetCallType(CallType::RTT);
+    pMtcSession->SetCallType(CallType::VT);
+    RequestType eType = RequestType::UPDATE;
+
+    pMtcSession->HandleRequest(eType, objMessage);
+
+    EXPECT_EQ(CallType::VIDEO_RTT, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleUpdateRequestWithoutSdpInvokesSetCallTypeWithInitialOfferedType)
+{
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_MEDIA_TYPE_FOR_OFFERLESS_REINVITE_INT))
+            .WillByDefault(Return(ConfigVoice::OFFERLESS_REINVITE_MEDIA_TYPE_INITIALLY_OFFERED));
+
+    SipMethod objSipMethod(SipMethod::INVITE);
+    ON_CALL(objMessage, GetMethod()).WillByDefault(ReturnRef(objSipMethod));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    CreateMtcSession(CallType::VT, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    pMtcSession->SetCallType(CallType::VOIP);
+    RequestType eType = RequestType::UPDATE;
+
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    pMtcSession->HandleRequest(eType, objMessage);
+
+    EXPECT_EQ(CallType::VT, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleUpdateRequestDoesNotCreateConferenceIfAlreadyExists)
+{
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_MEDIA_TYPE_FOR_OFFERLESS_REINVITE_INT))
+            .WillByDefault(Return(ConfigVoice::OFFERLESS_REINVITE_MEDIA_TYPE_INITIALLY_OFFERED));
+    SipMethod objSipMethod(SipMethod::INVITE);
+    ON_CALL(objMessage, GetMethod()).WillByDefault(ReturnRef(objSipMethod));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    CreateMtcSession(CallType::VT, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    pMtcSession->SetCallType(CallType::VOIP);
+    RequestType eType = RequestType::UPDATE;
+
+    ON_CALL(objMessageUtils, IsFocusConf(&objMessage)).WillByDefault(Return(IMS_TRUE));
+
+    MockIConferenceManager objConferenceManager;
+    ON_CALL(objContext, GetConferenceManager).WillByDefault(ReturnRef(objConferenceManager));
+    MockIConferenceController objConferenceController;
+    ON_CALL(objConferenceManager, GetController(_)).WillByDefault(Return(&objConferenceController));
+    EXPECT_CALL(objConferenceManager, CreateController(_, ConferenceType::PARTICIPANT)).Times(0);
+    pMtcSession->HandleRequest(eType, objMessage);
+}
+
+TEST_F(MtcSessionTest, HandleUpdateRequestCreatesConferenceControllerIfIsfocusAndConfigEnabled)
+{
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_MEDIA_TYPE_FOR_OFFERLESS_REINVITE_INT))
+            .WillByDefault(Return(ConfigVoice::OFFERLESS_REINVITE_MEDIA_TYPE_INITIALLY_OFFERED));
+    SipMethod objSipMethod(SipMethod::INVITE);
+    ON_CALL(objMessage, GetMethod()).WillByDefault(ReturnRef(objSipMethod));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    CreateMtcSession(CallType::VT, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    pMtcSession->SetCallType(CallType::VOIP);
+    RequestType eType = RequestType::UPDATE;
+
+    ON_CALL(objMessageUtils, IsFocusConf(&objMessage)).WillByDefault(Return(IMS_TRUE));
+
+    MockIConferenceManager objConferenceManager;
+    ON_CALL(objContext, GetConferenceManager).WillByDefault(ReturnRef(objConferenceManager));
+    ON_CALL(objConferenceManager, GetController(_)).WillByDefault(Return(IMS_NULL));
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVoice::KEY_ENABLE_CONFERENCE_SUBSCRIBE_BY_PARTICIPANT_BOOL))
+            .WillByDefault(Return(IMS_TRUE));
+    ON_CALL(*pConfigurationProxy, GetInt(ConfigVoice::KEY_CONFERENCE_SUBSCRIBE_TYPE_INT))
+            .WillByDefault(Return(ConfigVoice::CONFERENCE_SUBSCRIBE_TYPE_IN_DIALOG));
+
+    MockIConferenceController objConferenceController;
+    EXPECT_CALL(objConferenceManager, CreateController(_, ConferenceType::PARTICIPANT))
+            .WillOnce(ReturnRef(objConferenceController));
+    EXPECT_CALL(objConferenceController, ProcessCommand(IConferenceController::JOINED));
+
+    pMtcSession->HandleRequest(eType, objMessage);
+}
+
+TEST_F(MtcSessionTest, HandleResponseInvokesSetCallTypeIfDifferentCallType)
+{
+    CreateMtcSession(CallType::VOIP, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    ResponseType eType = ResponseType::PROVISIONAL_RESPONSE;
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVt::KEY_SUPPORT_VIDEO_CALL_UPGRADE_REGARDLESS_OF_FEATURE_TAGS_BOOL))
+            .WillByDefault(Return(IMS_FALSE));
+    ON_CALL(*pConfigurationProxy,
+            Contains(ConfigVoice::KEY_CARRIER_SPECIFIC_SIP_HEADERS_STRING_ARRAY,
+                    MessageUtil::STR_P_TTA_VOLTE_INFO))
+            .WillByDefault(Return(IMS_FALSE));
+
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, GetCallType(&objMessage, &objSession, IMS_TRUE))
+            .WillByDefault(Return(CallType::VT));
+    ON_CALL(objMessageUtils, IsFocusConf(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    EXPECT_EQ(CallType::UNKNOWN, pMtcSession->GetPreviousCallType());
+    EXPECT_EQ(CallType::VOIP, pMtcSession->GetCallType());
+
+    pMtcSession->HandleResponse(eType, objMessage);
+
+    // previous call type is not changed.
+    EXPECT_EQ(CallType::VOIP, pMtcSession->GetPreviousCallType());
+    EXPECT_EQ(CallType::VT, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleResponseDoesNotInvokeSetCallTypeIfSameCallType)
+{
+    CreateMtcSession(CallType::VT, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    ResponseType eType = ResponseType::EARLY_UPDATE_RESPONSE;
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVt::KEY_SUPPORT_VIDEO_CALL_UPGRADE_REGARDLESS_OF_FEATURE_TAGS_BOOL))
+            .WillByDefault(Return(IMS_FALSE));
+    ON_CALL(*pConfigurationProxy,
+            Contains(ConfigVoice::KEY_CARRIER_SPECIFIC_SIP_HEADERS_STRING_ARRAY,
+                    MessageUtil::STR_P_TTA_VOLTE_INFO))
+            .WillByDefault(Return(IMS_FALSE));
+
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, GetCallType(&objMessage, &objSession, IMS_TRUE))
+            .WillByDefault(Return(CallType::VT));
+    ON_CALL(objMessageUtils, IsFocusConf(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    EXPECT_EQ(CallType::UNKNOWN, pMtcSession->GetPreviousCallType());
+    EXPECT_EQ(CallType::VT, pMtcSession->GetCallType());
+
+    pMtcSession->HandleResponse(eType, objMessage);
+
+    // previous call type is not changed.
+    EXPECT_EQ(CallType::UNKNOWN, pMtcSession->GetPreviousCallType());
+    EXPECT_EQ(CallType::VT, pMtcSession->GetCallType());
+}
+
+TEST_F(MtcSessionTest, HandleResponseDoesNotSetsPrackPendingIfUnreliable183)
+{
+    CreateMtcSession(CallType::VT, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    ON_CALL(objMessage, GetStatusCode).WillByDefault(Return(SipStatusCode::SC_183));
+    ON_CALL(objSipMessage, IsMessageRpr).WillByDefault(Return(IMS_FALSE));
+
+    pMtcSession->HandleResponse(ResponseType::PROVISIONAL_RESPONSE, objMessage);
+    EXPECT_FALSE(pMtcSession->IsPrackPending());
+}
+
+TEST_F(MtcSessionTest, HandleResponseSetsPrackPendingIfReliable183AndPrackResponse)
+{
+    CreateMtcSession(CallType::VT, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    ON_CALL(objMessage, GetStatusCode).WillByDefault(Return(SipStatusCode::SC_183));
+    ON_CALL(objSipMessage, IsMessageRpr).WillByDefault(Return(IMS_TRUE));
+
+    pMtcSession->HandleResponse(ResponseType::PROVISIONAL_RESPONSE, objMessage);
+    EXPECT_TRUE(pMtcSession->IsPrackPending());
+
+    pMtcSession->HandleResponse(ResponseType::PRACK_RESPONSE, objMessage);
+    EXPECT_FALSE(pMtcSession->IsPrackPending());
+}
+
+TEST_F(MtcSessionTest, HandleResponseSetsInConferenceIfIsFocus)
+{
+    CreateMtcSession(CallType::VT, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    ResponseType eType = ResponseType::PROVISIONAL_RESPONSE;
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVt::KEY_SUPPORT_VIDEO_CALL_UPGRADE_REGARDLESS_OF_FEATURE_TAGS_BOOL))
+            .WillByDefault(Return(IMS_FALSE));
+    ON_CALL(*pConfigurationProxy,
+            Contains(ConfigVoice::KEY_CARRIER_SPECIFIC_SIP_HEADERS_STRING_ARRAY,
+                    MessageUtil::STR_P_TTA_VOLTE_INFO))
+            .WillByDefault(Return(IMS_FALSE));
+
+    ON_CALL(objMessageUtils, GetCallType(&objMessage, &objSession, IMS_TRUE))
+            .WillByDefault(Return(CallType::VT));
+    ON_CALL(objMessageUtils, IsFocusConf(&objMessage)).WillByDefault(Return(IMS_TRUE));
+
+    MockIConferenceManager objConferenceManager;
+    ON_CALL(objContext, GetConferenceManager()).WillByDefault(ReturnRef(objConferenceManager));
+
+    EXPECT_FALSE(objCallInfo.bConference);
+
+    pMtcSession->HandleResponse(eType, objMessage);
+
+    EXPECT_TRUE(objCallInfo.bConference);
+
+    // To increase coverage
+    pMtcSession->HandleResponse(eType, objMessage);
+}
+
+TEST_F(MtcSessionTest, HandleResponseResetsOngoingUpdateTypeIfEarlyUpdateResponse)
+{
+    // Update m_eOngoingUpdateType
+    CreateMtcSession();
+    SetUpForSetSdp(NegotiationState::STATE_IDLE, IMS_SUCCESS);
+    pMtcSession->SendEarlyUpdate(UpdateType::SESSION);
+    EXPECT_EQ(pMtcSession->GetOngoingUpdateType(), UpdateType::SESSION);
+
+    ResponseType eType = ResponseType::EARLY_UPDATE_RESPONSE;
+
+    ON_CALL(objMessageUtils, GetCallType(&objMessage, &objSession, IMS_TRUE))
+            .WillByDefault(Return(CallType::VOIP));
+    ON_CALL(objMessageUtils, IsFocusConf(&objMessage)).WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessage, GetStatusCode()).WillByDefault(Return(SipStatusCode::SC_200));
+
+    pMtcSession->HandleResponse(eType, objMessage);
+
+    EXPECT_EQ(pMtcSession->GetOngoingUpdateType(), UpdateType::NONE);
+}
+
+TEST_F(MtcSessionTest, HandleResponseSetsTerminatedFlagIf199)
+{
+    // Update m_eOngoingUpdateType
+    CreateMtcSession();
+    ResponseType eType = ResponseType::EARLY_UPDATE_RESPONSE;
+
+    ON_CALL(objMessageUtils, GetCallType(&objMessage, &objSession, IMS_TRUE))
+            .WillByDefault(Return(CallType::VOIP));
+    ON_CALL(objMessageUtils, IsFocusConf(&objMessage)).WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessage, GetStatusCode()).WillByDefault(Return(SipStatusCode::SC_199));
+
+    pMtcSession->HandleResponse(eType, objMessage);
+
+    static const IMS_UINT32 ANY_REASON_CODE = 0;
+    const CallReasonInfo objCallReasonInfo(ANY_REASON_CODE);
+
+    // To check that m_bTerminated is set to true. If it's true, Terminate() returns failure.
+    EXPECT_EQ(pMtcSession->Terminate(IMS_TRUE, objCallReasonInfo), IMS_FAILURE);
+}
+
+TEST_F(MtcSessionTest, SetCallTypeUpdatesCurrentCallTypeAndPreviousCallType)
+{
+    CreateMtcSession(CallType::VOIP, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    EXPECT_EQ(pMtcSession->GetCallType(), CallType::VOIP);
+    EXPECT_EQ(pMtcSession->GetPreviousCallType(), CallType::UNKNOWN);
+
+    pMtcSession->SetCallType(CallType::VT);
+    EXPECT_EQ(pMtcSession->GetCallType(), CallType::VT);
+    EXPECT_EQ(pMtcSession->GetPreviousCallType(), CallType::VOIP);
+}
+
+TEST_F(MtcSessionTest, SetCapableCallTypeUpdatesCurrentCallTypeWhenVideoRttCapable)
+{
+    CreateMtcSession(CallType::VOIP, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+
+    pMtcSession->SetCapableCallType(CallType::VOIP);
+    EXPECT_EQ(pMtcSession->GetCallType(), CallType::VOIP);
+    pMtcSession->SetCapableCallType(CallType::VT);
+    EXPECT_EQ(pMtcSession->GetCallType(), CallType::VT);
+    pMtcSession->SetCapableCallType(CallType::RTT);
+    EXPECT_EQ(pMtcSession->GetCallType(), CallType::RTT);
+    pMtcSession->SetCapableCallType(CallType::VIDEO_RTT);
+    EXPECT_EQ(pMtcSession->GetCallType(), CallType::VIDEO_RTT);
+}
+
+TEST_F(MtcSessionTest, SetCapableCallTypeUpdatesCurrentCallTypeWhenVideoCapable)
+{
+    CreateMtcSession(CallType::VOIP, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_FALSE);
+
+    pMtcSession->SetCapableCallType(CallType::VOIP);
+    EXPECT_EQ(pMtcSession->GetCallType(), CallType::VOIP);
+    pMtcSession->SetCapableCallType(CallType::VT);
+    EXPECT_EQ(pMtcSession->GetCallType(), CallType::VT);
+    pMtcSession->SetCapableCallType(CallType::RTT);
+    EXPECT_EQ(pMtcSession->GetCallType(), CallType::VOIP);
+    pMtcSession->SetCapableCallType(CallType::VIDEO_RTT);
+    EXPECT_EQ(pMtcSession->GetCallType(), CallType::VT);
+}
+
+TEST_F(MtcSessionTest, SetCapableCallTypeUpdatesCurrentCallTypeWhenRttCapable)
+{
+    CreateMtcSession(CallType::VOIP, PeerType::MO, IMS_TRUE, IMS_FALSE, IMS_TRUE);
+
+    pMtcSession->SetCapableCallType(CallType::VOIP);
+    EXPECT_EQ(pMtcSession->GetCallType(), CallType::VOIP);
+    pMtcSession->SetCapableCallType(CallType::VT);
+    EXPECT_EQ(pMtcSession->GetCallType(), CallType::VOIP);
+    pMtcSession->SetCapableCallType(CallType::RTT);
+    EXPECT_EQ(pMtcSession->GetCallType(), CallType::RTT);
+    pMtcSession->SetCapableCallType(CallType::VIDEO_RTT);
+    EXPECT_EQ(pMtcSession->GetCallType(), CallType::RTT);
+}
+
+TEST_F(MtcSessionTest, SetCapableCallTypeUpdatesCurrentCallTypeWhenNoVideoRttCapable)
+{
+    CreateMtcSession(CallType::VOIP, PeerType::MO, IMS_TRUE, IMS_FALSE, IMS_FALSE);
+
+    pMtcSession->SetCapableCallType(CallType::VOIP);
+    EXPECT_EQ(pMtcSession->GetCallType(), CallType::VOIP);
+    pMtcSession->SetCapableCallType(CallType::VT);
+    EXPECT_EQ(pMtcSession->GetCallType(), CallType::VOIP);
+    pMtcSession->SetCapableCallType(CallType::RTT);
+    EXPECT_EQ(pMtcSession->GetCallType(), CallType::VOIP);
+    pMtcSession->SetCapableCallType(CallType::VIDEO_RTT);
+    EXPECT_EQ(pMtcSession->GetCallType(), CallType::VOIP);
+}
+
+TEST_F(MtcSessionTest,
+        HandleStartRequestUpdatesVideoCapabilityTrueIfSupportVideoCallUpgradeRegardlessOfFeatureTags)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    DisableVideoTextCapabilityByRemoteMessage();
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVt::KEY_SUPPORT_VIDEO_CALL_UPGRADE_REGARDLESS_OF_FEATURE_TAGS_BOOL))
+            .WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, GetCallTypeFromSdp(_, _, _, _)).WillByDefault(Return(CallType::VOIP));
+
+    pMtcSession->HandleRequest(RequestType::START, objMessage);
+
+    EXPECT_TRUE(pMtcSession->IsVideoCapable());
+    EXPECT_FALSE(pMtcSession->IsRttCapable());
+}
+
+TEST_F(MtcSessionTest, HandleStartRequestUpdatesVideoCapabilityTrueIfAvchangeInPTtaVolteInfoHeader)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    DisableVideoTextCapabilityByRemoteMessage();
+
+    ON_CALL(*pConfigurationProxy,
+            Contains(ConfigVoice::KEY_CARRIER_SPECIFIC_SIP_HEADERS_STRING_ARRAY,
+                    MessageUtil::STR_P_TTA_VOLTE_INFO))
+            .WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils,
+            GetHeader(_, ISipHeader::UNKNOWN, AString(MessageUtil::STR_P_TTA_VOLTE_INFO)))
+            .WillByDefault(Return(MessageUtil::STR_AVCHANGE));
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, GetCallTypeFromSdp(_, _, _, _)).WillByDefault(Return(CallType::VOIP));
+
+    pMtcSession->HandleRequest(RequestType::START, objMessage);
+
+    EXPECT_TRUE(pMtcSession->IsVideoCapable());
+    EXPECT_FALSE(pMtcSession->IsRttCapable());
+}
+
+TEST_F(MtcSessionTest, HandleStartRequestUpdatesCapabilitiesTrueIfHasVideoTextFeatureTagsAndNoSdp)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    DisableVideoTextCapabilityByRemoteMessage();
+
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, GetCallTypeFromSdp(_, _, _, _))
+            .WillByDefault(Return(CallType::UNKNOWN));
+
+    pMtcSession->HandleRequest(RequestType::START, objMessage);
+
+    EXPECT_TRUE(pMtcSession->IsVideoCapable());
+    EXPECT_TRUE(pMtcSession->IsRttCapable());
+}
+
+TEST_F(MtcSessionTest,
+        HandleStartRequestUpdatesCapabilitiesTrueIfHasVideoTextFeatureTagsAndNoVideoTextInSdp)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    DisableVideoTextCapabilityByRemoteMessage();
+
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, GetCallTypeFromSdp(_, _, _, _)).WillByDefault(Return(CallType::VOIP));
+
+    pMtcSession->HandleRequest(RequestType::START, objMessage);
+
+    EXPECT_TRUE(pMtcSession->IsVideoCapable());
+    EXPECT_TRUE(pMtcSession->IsRttCapable());
+}
+
+TEST_F(MtcSessionTest,
+        HandleStartRequestUpdatesCapabilitiesTrueIfHasVideoTextFeatureTagsAndVideoInSdp)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    DisableVideoTextCapabilityByRemoteMessage();
+
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, GetCallTypeFromSdp(_, _, _, _)).WillByDefault(Return(CallType::VT));
+
+    pMtcSession->HandleRequest(RequestType::START, objMessage);
+
+    EXPECT_TRUE(pMtcSession->IsVideoCapable());
+    EXPECT_TRUE(pMtcSession->IsRttCapable());
+}
+
+TEST_F(MtcSessionTest,
+        HandleStartRequestUpdatesCapabilitiesTrueIfHasVideoTextFeatureTagsAndTextInSdp)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    DisableVideoTextCapabilityByRemoteMessage();
+
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, GetCallTypeFromSdp(_, _, _, _)).WillByDefault(Return(CallType::RTT));
+
+    pMtcSession->HandleRequest(RequestType::START, objMessage);
+
+    EXPECT_TRUE(pMtcSession->IsVideoCapable());
+    EXPECT_TRUE(pMtcSession->IsRttCapable());
+}
+
+TEST_F(MtcSessionTest,
+        HandleStartRequestUpdatesCapabilitiesTrueIfHasVideoTextFeatureTagsAndVideoTextInSdp)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    DisableVideoTextCapabilityByRemoteMessage();
+
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, GetCallTypeFromSdp(_, _, _, _))
+            .WillByDefault(Return(CallType::VIDEO_RTT));
+
+    pMtcSession->HandleRequest(RequestType::START, objMessage);
+
+    EXPECT_TRUE(pMtcSession->IsVideoCapable());
+    EXPECT_TRUE(pMtcSession->IsRttCapable());
+}
+
+TEST_F(MtcSessionTest, HandleStartRequestKeepsCapabilityFalseIfNoFeatureTagsAndNoSdp)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    DisableVideoTextCapabilityByRemoteMessage();
+
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, GetCallTypeFromSdp(_, _, _, _))
+            .WillByDefault(Return(CallType::UNKNOWN));
+
+    pMtcSession->HandleRequest(RequestType::START, objMessage);
+
+    EXPECT_FALSE(pMtcSession->IsVideoCapable());
+    EXPECT_FALSE(pMtcSession->IsRttCapable());
+}
+
+TEST_F(MtcSessionTest, HandleStartRequestUpdatesCapabilitiesFalseIfNoFeatureTagsAndNoVideoTextInSdp)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    DisableVideoTextCapabilityByRemoteMessage();
+
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, GetCallTypeFromSdp(_, _, _, _)).WillByDefault(Return(CallType::VOIP));
+
+    pMtcSession->HandleRequest(RequestType::START, objMessage);
+
+    EXPECT_FALSE(pMtcSession->IsVideoCapable());
+    EXPECT_FALSE(pMtcSession->IsRttCapable());
+}
+
+TEST_F(MtcSessionTest, HandleStartRequestUpdatesCapabilitiesTrueIfNoFeatureTagsAndVideoTextInSdp)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    DisableVideoTextCapabilityByRemoteMessage();
+
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, GetCallTypeFromSdp(_, _, _, _))
+            .WillByDefault(Return(CallType::VIDEO_RTT));
+
+    pMtcSession->HandleRequest(RequestType::START, objMessage);
+
+    EXPECT_TRUE(pMtcSession->IsVideoCapable());
+    EXPECT_TRUE(pMtcSession->IsRttCapable());
+}
+
+TEST_F(MtcSessionTest, HandleStartRequestKeepsCapabilitiesFalseIfFeatureTagUnknownAndNoSdp)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    DisableVideoTextCapabilityByRemoteMessage();
+
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage))
+            .WillByDefault(Return(std::nullopt));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage))
+            .WillByDefault(Return(std::nullopt));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, GetCallTypeFromSdp(_, _, _, _))
+            .WillByDefault(Return(CallType::UNKNOWN));
+
+    pMtcSession->HandleRequest(RequestType::START, objMessage);
+
+    EXPECT_FALSE(pMtcSession->IsVideoCapable());
+    EXPECT_FALSE(pMtcSession->IsRttCapable());
+}
+
+TEST_F(MtcSessionTest,
+        HandleStartRequestKeepsCapabilitiesFalseIfFeatureTagUnknownAndNoVideoTextInSdp)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    DisableVideoTextCapabilityByRemoteMessage();
+
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage))
+            .WillByDefault(Return(std::nullopt));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage))
+            .WillByDefault(Return(std::nullopt));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, GetCallTypeFromSdp(_, _, _, _)).WillByDefault(Return(CallType::VOIP));
+
+    pMtcSession->HandleRequest(RequestType::START, objMessage);
+
+    EXPECT_FALSE(pMtcSession->IsVideoCapable());
+    EXPECT_FALSE(pMtcSession->IsRttCapable());
+}
+
+TEST_F(MtcSessionTest,
+        HandleStartRequestUpdatesCapabilitiesTrueIfFeatureTagUnknownAndVideoTextInSdp)
+{
+    CreateMtcSession(CallType::UNKNOWN, PeerType::MT, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+    DisableVideoTextCapabilityByRemoteMessage();
+
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage))
+            .WillByDefault(Return(std::nullopt));
+    ON_CALL(objMessageUtils, IsTextFeatureIncluded(&objMessage))
+            .WillByDefault(Return(std::nullopt));
+    ON_CALL(objMessageUtils, HasSdp(&objMessage)).WillByDefault(Return(IMS_TRUE));
+    ON_CALL(objMessageUtils, GetCallTypeFromSdp(_, _, _, _))
+            .WillByDefault(Return(CallType::VIDEO_RTT));
+
+    pMtcSession->HandleRequest(RequestType::START, objMessage);
+
+    EXPECT_TRUE(pMtcSession->IsVideoCapable());
+    EXPECT_TRUE(pMtcSession->IsRttCapable());
+}
+
+TEST_F(MtcSessionTest, HandleResponseUpdatesCallTypeAndCapabilityFromMessage)
+{
+    CreateMtcSession(CallType::VOIP, PeerType::MO, IMS_TRUE, IMS_TRUE, IMS_TRUE);
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVt::KEY_SUPPORT_VIDEO_CALL_UPGRADE_REGARDLESS_OF_FEATURE_TAGS_BOOL))
+            .WillByDefault(Return(IMS_FALSE));
+    AString strHeader(MessageUtil::STR_P_TTA_VOLTE_INFO);
+    ON_CALL(*pConfigurationProxy,
+            Contains(ConfigVoice::KEY_CARRIER_SPECIFIC_SIP_HEADERS_STRING_ARRAY,
+                    MessageUtil::STR_P_TTA_VOLTE_INFO))
+            .WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_FALSE));
+
+    ON_CALL(objMessageUtils, GetCallType(&objMessage, &objSession, IMS_TRUE))
+            .WillByDefault(Return(CallType::VT));
+    ON_CALL(objMessageUtils, GetCallTypeFromSdp(_, _, _, _)).WillByDefault(Return(CallType::VT));
+    pMtcSession->HandleResponse(ResponseType::ACCEPT, objMessage);
+    EXPECT_EQ(CallType::VT, pMtcSession->GetCallType());
+    EXPECT_TRUE(pMtcSession->IsVideoCapable());
+
+    ON_CALL(objMessageUtils, GetCallType(&objMessage, &objSession, IMS_TRUE))
+            .WillByDefault(Return(CallType::VOIP));
+    ON_CALL(objMessageUtils, GetCallTypeFromSdp(_, _, _, _)).WillByDefault(Return(CallType::VOIP));
+    pMtcSession->HandleResponse(ResponseType::ACCEPT, objMessage);
+    EXPECT_EQ(CallType::VOIP, pMtcSession->GetCallType());
+    EXPECT_FALSE(pMtcSession->IsVideoCapable());
+}
+
+TEST_F(MtcSessionTest, HandleRejectResponseKeepsCallTypeVoipAndCapabilityFalse)
+{
+    CreateMtcSession(CallType::VOIP, PeerType::MO, IMS_TRUE, IMS_FALSE, IMS_TRUE);
+
+    ON_CALL(*pConfigurationProxy,
+            GetBoolean(ConfigVt::KEY_SUPPORT_VIDEO_CALL_UPGRADE_REGARDLESS_OF_FEATURE_TAGS_BOOL))
+            .WillByDefault(Return(IMS_FALSE));
+    AString strHeader(MessageUtil::STR_P_TTA_VOLTE_INFO);
+    ON_CALL(*pConfigurationProxy,
+            Contains(ConfigVoice::KEY_CARRIER_SPECIFIC_SIP_HEADERS_STRING_ARRAY,
+                    MessageUtil::STR_P_TTA_VOLTE_INFO))
+            .WillByDefault(Return(IMS_FALSE));
+    ON_CALL(objMessageUtils, IsVideoFeatureIncluded(&objMessage)).WillByDefault(Return(IMS_TRUE));
+
+    pMtcSession->HandleResponse(ResponseType::REJECT, objMessage);
+
+    EXPECT_EQ(CallType::VOIP, pMtcSession->GetCallType());
+    EXPECT_FALSE(pMtcSession->IsVideoCapable());
+}

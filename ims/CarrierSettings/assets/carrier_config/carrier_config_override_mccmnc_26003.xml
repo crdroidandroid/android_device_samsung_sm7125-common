@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Orange PL: retain the b7d3c1986df8 incoming-call correction above imported policy. -->
+<carrier_config>
+    <boolean name="imsvoice.prack_supported_for_18x_bool" value="false" />
+    <string-array name="imsvoice.initial_mt_final_response_headers_to_remove_string_array" num="5">
+        <item value="Allow" />
+        <item value="P-Preferred-Identity" />
+        <item value="P-Access-Network-Info" />
+        <item value="Server" />
+        <item value="Session-ID" />
+    </string-array>
+    <boolean name="imsvoice.initial_mt_final_response_compact_contact_bool" value="true" />
+</carrier_config>

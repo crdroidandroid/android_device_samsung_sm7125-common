@@ -1,0 +1,39 @@
+/*
+ * Copyright (C) 2022 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#ifndef MOCK_I_MTC_DIALING_PLAN_H_
+#define MOCK_I_MTC_DIALING_PLAN_H_
+
+#include "AString.h"
+#include "ImsTypeDef.h"
+#include "dialingplan/IMtcDialingPlan.h"
+#include "dialingplan/NormalDialingPlan.h"
+#include <gmock/gmock.h>
+
+struct CallInfo;
+using Scheme = NormalDialingPlan::Scheme;
+
+class MockIMtcDialingPlan : public IMtcDialingPlan
+{
+public:
+    MOCK_METHOD(AString, GetToUri,
+            (IN const AString& strNumber, IN IMtcCallContext& objContext, IN Scheme eScheme),
+            (override));
+    MOCK_METHOD(AString, GetToUriForEmergencyTestNumber,
+            (IN const AString& strNumber, IN IMtcCallContext& objContext), (override));
+};
+
+#endif

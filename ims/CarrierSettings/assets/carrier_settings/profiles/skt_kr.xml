@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated from Google CarrierSettings. See SOURCE.md for provenance. -->
+<carrier_config>
+    <string name="ims.ims_user_agent_string">TTA-VoLTE/3.0 #MODEL#/#BUILD# Device-Type/#TYPE# #OPERATOR#</string>
+    <boolean name="ims.sip_over_ipsec_enabled_bool" value="false" />
+    <int name="ims.sip_timer_b_millis_int" value="8000" />
+    <int name="ims.sip_timer_c_millis_int" value="72000" />
+    <int name="ims.sip_timer_d_millis_int" value="32000" />
+    <int name="ims.sip_timer_f_millis_int" value="44000" />
+    <int name="ims.sip_timer_h_millis_int" value="36000" />
+    <int name="ims.sip_timer_j_millis_int" value="32000" />
+    <pbundle_as_map name="imsvoice.audio_codec_capability_payload_types_bundle">
+        <int-array name="imsvoice.amrnb_payload_type_int_array" num="2">
+            <item value="98" />
+            <item value="103" />
+        </int-array>
+        <int-array name="imsvoice.amrwb_payload_type_int_array" num="2">
+            <item value="100" />
+            <item value="105" />
+        </int-array>
+        <int-array name="imsvoice.dtmfnb_payload_type_int_array" num="1">
+            <item value="97" />
+        </int-array>
+        <int-array name="imsvoice.dtmfwb_payload_type_int_array" num="1">
+            <item value="96" />
+        </int-array>
+    </pbundle_as_map>
+    <string name="imsvoice.conference_factory_uri_string">conference-factory@sktims.net</string>
+    <int name="imsvoice.session_expires_timer_sec_int" value="180" />
+</carrier_config>
