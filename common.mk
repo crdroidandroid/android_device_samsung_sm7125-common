@@ -128,6 +128,7 @@ PRODUCT_PACKAGES += \
     libui_shim.vendor
 
 $(call soong_config_set_bool,samsungCameraVars,needs_sec_reserved_field,true)
+$(call soong_config_set_bool,samsungCameraVars,needs_sec_qcom_reserved_field,true)
 
 $(call soong_config_set_bool,camera,ext_lib,true)
 $(call soong_config_set,libcameraservice,ext_lib,//$(LOCAL_PATH)/configs/camera:libcameraservice_extension.sm7125)
