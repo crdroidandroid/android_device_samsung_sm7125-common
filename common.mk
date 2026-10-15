@@ -137,6 +137,10 @@ $(call soong_config_set,libcameraservice,ext_lib,//$(LOCAL_PATH)/configs/camera:
 PRODUCT_PACKAGES += \
     android.hardware.cas@1.2-service
 
+# CarrierSettings
+PRODUCT_PACKAGES += \
+    CarrierSettingsResCommon
+
 # Charger
 PRODUCT_PACKAGES += \
     charger_res_images_vendor
