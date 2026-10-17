@@ -189,6 +189,9 @@ PRODUCT_PACKAGES += \
     libcrypto_shim.vendor \
     android.hardware.drm@1.3.vendor
 
+# Face unlock
+TARGET_FACE_UNLOCK_SUPPORTED := true
+
 # Fingerprint
 PRODUCT_PACKAGES += \
     android.hardware.biometrics.fingerprint-service.samsung
