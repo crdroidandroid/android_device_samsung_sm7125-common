@@ -25,6 +25,10 @@
 
 #include <hidl/MQDescriptor.h>
 
+#include <condition_variable>
+#include <mutex>
+#include <thread>
+
 namespace android {
 namespace hardware {
 namespace audio {
@@ -141,6 +145,16 @@ struct PrimaryDevice : public IPrimaryDevice {
 #endif
   private:
     sp<Device> mDevice;
+
+    // Serializes mode changes; IN_CALL is deferred until the RIL reports a CS call.
+    std::mutex mModeLock;
+    std::condition_variable mModeCv;
+    bool mInCallPending = false;
+    bool mStopModeThread = false;
+    std::thread mModeThread;
+
+    Result applyModeLocked(AudioMode mode);
+    void deferredInCallLoop();
 
     virtual ~PrimaryDevice();
 };

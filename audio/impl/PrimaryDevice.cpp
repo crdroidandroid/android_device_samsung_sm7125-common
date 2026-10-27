@@ -22,6 +22,8 @@
 #include <cutils/properties.h>
 #include <string.h>
 
+#include <chrono>
+
 #if MAJOR_VERSION >= 4
 #include <cmath>
 #endif
@@ -42,6 +44,12 @@ PrimaryDevice::~PrimaryDevice() {
     // Do not call mDevice->close here. If there are any unclosed streams,
     // they only hold IDevice instance, not IPrimaryDevice, thus IPrimaryDevice
     // "part" of a device can be destroyed before the streams.
+    {
+        std::lock_guard<std::mutex> lock(mModeLock);
+        mStopModeThread = true;
+    }
+    mModeCv.notify_all();
+    if (mModeThread.joinable()) mModeThread.join();
 }
 
 // Methods from ::android::hardware::audio::CPP_VERSION::IDevice follow.
@@ -210,35 +218,61 @@ Return<Result> PrimaryDevice::setVoiceVolume(float volume) {
                                   mDevice->device()->set_voice_volume(mDevice->device(), volume));
 }
 
-Return<Result> PrimaryDevice::setMode(AudioMode mode) {
-    /* On stock ROM Samsung sets the g_call_state and g_call_sim_slot audio parameters
-     * in the framework, breaking it on AOSP ROMs.
-     * For the g_call_sim_slot parameter 0x01 describes SIM1 and 0x02 SIM2.
-     */
+/* On stock ROM Samsung sets the g_call_state and g_call_sim_slot audio parameters
+ * in the framework, breaking it on AOSP ROMs.
+ * For the g_call_sim_slot parameter 0x01 describes SIM1 and 0x02 SIM2.
+ */
+enum class CallSlotState { UNKNOWN, IDLE, SIM1, SIM2 };
 
-    char simSlot1[92], simSlot2[92];
+static CallSlotState getCallSlotState() {
+    char simSlot1[PROPERTY_VALUE_MAX], simSlot2[PROPERTY_VALUE_MAX];
 
     // These props return either 0 (not calling),
     // or 1 (SIM is calling)
     property_get("vendor.calls.slot_id0", simSlot1, "");
     property_get("vendor.calls.slot_id1", simSlot2, "");
 
-    // Wait until one sim slot reports a call
-    if (mode == AudioMode::IN_CALL) {
-        while (strcmp(simSlot1, "0") == 0 && strcmp(simSlot2, "0") == 0) {
-            property_get("vendor.calls.slot_id0", simSlot1, "");
-            property_get("vendor.calls.slot_id1", simSlot2, "");
+    if (strcmp(simSlot1, "1") == 0) return CallSlotState::SIM1;
+    if (strcmp(simSlot2, "1") == 0) return CallSlotState::SIM2;
+    if (strcmp(simSlot1, "0") == 0 && strcmp(simSlot2, "0") == 0) return CallSlotState::IDLE;
+    return CallSlotState::UNKNOWN;
+}
+
+Result PrimaryDevice::applyModeLocked(AudioMode mode) {
+    switch (getCallSlotState()) {
+        case CallSlotState::SIM1:
+            mDevice->halSetParameters("g_call_sim_slot=0x01");
+            break;
+        case CallSlotState::SIM2:
+            mDevice->halSetParameters("g_call_sim_slot=0x02");
+            break;
+        default:
+            break;
+    }
+
+    return mDevice->analyzeStatus(
+        "set_mode",
+        mDevice->device()->set_mode(mDevice->device(), static_cast<audio_mode_t>(mode)));
+}
+
+void PrimaryDevice::deferredInCallLoop() {
+    std::unique_lock<std::mutex> lock(mModeLock);
+    while (!mStopModeThread) {
+        if (!mInCallPending) {
+            mModeCv.wait(lock);
+            continue;
         }
+        if (getCallSlotState() != CallSlotState::IDLE) {
+            mInCallPending = false;
+            ALOGI("RIL reported a CS call, applying deferred IN_CALL mode");
+            applyModeLocked(AudioMode::IN_CALL);
+            continue;
+        }
+        mModeCv.wait_for(lock, std::chrono::milliseconds(20));
     }
+}
 
-    if (strcmp(simSlot1, "1") == 0) {
-        // SIM1
-        mDevice->halSetParameters("g_call_sim_slot=0x01");
-    } else if (strcmp(simSlot2, "1") == 0) {
-        // SIM2
-        mDevice->halSetParameters("g_call_sim_slot=0x02");
-    }
-
+Return<Result> PrimaryDevice::setMode(AudioMode mode) {
     // INVALID, CURRENT, CNT, MAX are reserved for internal use.
     // TODO: remove the values from the HIDL interface
     switch (mode) {
@@ -254,9 +288,23 @@ Return<Result> PrimaryDevice::setMode(AudioMode mode) {
             return Result::INVALID_ARGUMENTS;
     };
 
-    return mDevice->analyzeStatus(
-        "set_mode",
-        mDevice->device()->set_mode(mDevice->device(), static_cast<audio_mode_t>(mode)));
+    std::lock_guard<std::mutex> lock(mModeLock);
+    mInCallPending = false;
+
+    // Telecom enters IN_CALL before the RIL reports a CS call, and also briefly for IMS calls
+    // before switching to IN_COMMUNICATION. Wait for the RIL off the binder thread, so that
+    // audioserver is not blocked and a following mode change cancels the pending IN_CALL.
+    if (mode == AudioMode::IN_CALL && getCallSlotState() == CallSlotState::IDLE) {
+        ALOGI("No CS call reported by the RIL yet, deferring IN_CALL mode");
+        mInCallPending = true;
+        if (!mModeThread.joinable()) {
+            mModeThread = std::thread(&PrimaryDevice::deferredInCallLoop, this);
+        }
+        mModeCv.notify_all();
+        return Result::OK;
+    }
+
+    return applyModeLocked(mode);
 }
 
 Return<void> PrimaryDevice::getBtScoNrecEnabled(getBtScoNrecEnabled_cb _hidl_cb) {
